@@ -1,0 +1,4 @@
+interface:
+  display_name: "Darkmesh"
+  short_description: "Run Darkmesh relay/listener nodes and ingest OpenClaw sources"
+  default_prompt: "Use $darkmesh to run relay/listener nodes, autodiscover OpenClaw-connected sources, ingest them, and execute warm-intro requests."

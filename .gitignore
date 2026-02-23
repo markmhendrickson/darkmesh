@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.enc
+*.log
+.env
+.darkmesh/
+data/*/vault.key
+data/*/*.enc
+data/*/darkmesh_listener.cursor
+.DS_Store

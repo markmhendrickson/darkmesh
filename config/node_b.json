@@ -1,0 +1,22 @@
+{
+  "node_id": "node_b",
+  "vault_path": "data/node_b",
+  "self_identifiers": [
+    "casey@connector.com"
+  ],
+  "pseudonym_id": "p_node_b",
+  "capabilities": [
+    "warm_intro_v1"
+  ],
+  "dev_mode": true,
+  "port": 8002,
+  "listen_url": "http://localhost:8002",
+  "relay_url": "http://localhost:9000",
+  "relay_key": "demo-relay-key",
+  "response_wait_seconds": 5.0,
+  "post_ttl_seconds": 30,
+  "required_integrations": [
+    "contacts",
+    "interactions"
+  ]
+}
