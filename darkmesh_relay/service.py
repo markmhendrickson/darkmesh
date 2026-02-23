@@ -1,27 +1,43 @@
+import hmac
 import os
 import time
 import uuid
 from typing import Any, Dict, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 
 
 RELAY_API_PREFIX = "/darkmesh/relay"
 
 
+def _extract_header_key(request: Request) -> str:
+    direct = request.headers.get("x-darkmesh-key", "").strip()
+    if direct:
+        return direct
+
+    auth = request.headers.get("authorization", "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
+
+
 class DarkmeshRelayState:
-    def __init__(self, relay_key: str = "") -> None:
+    def __init__(self, relay_key: str) -> None:
+        if not relay_key:
+            raise ValueError("relay_key is required")
+
         self.relay_key = relay_key
         self.nodes: Dict[str, Dict[str, Any]] = {}
         self.posts: List[Dict[str, Any]] = []
         self.seq = 0
 
-    def _require_key(self, payload: Dict[str, Any]) -> None:
-        if not self.relay_key:
-            return
-        provided = str(payload.get("relay_key", ""))
-        if provided != self.relay_key:
+    def _require_key_value(self, provided: str) -> None:
+        if not provided or not hmac.compare_digest(provided, self.relay_key):
             raise HTTPException(status_code=403, detail="invalid relay_key")
+
+    def _require_key(self, payload: Dict[str, Any]) -> None:
+        provided = str(payload.get("relay_key", "")).strip()
+        self._require_key_value(provided)
 
     def _cleanup_posts(self) -> None:
         now = time.time()
@@ -60,7 +76,10 @@ class DarkmeshRelayState:
         response_token = str(payload.get("response_token", "")).strip()
 
         if not request_id or not requester_id or not requester_url or not template:
-            raise HTTPException(status_code=400, detail="request_id, requester_id, requester_url, and template are required")
+            raise HTTPException(
+                status_code=400,
+                detail="request_id, requester_id, requester_url, and template are required",
+            )
         if not response_token:
             raise HTTPException(status_code=400, detail="response_token is required")
 
@@ -143,7 +162,9 @@ def create_app() -> FastAPI:
         return {"ok": True, "node": record}
 
     @app.get(f"{RELAY_API_PREFIX}/nodes")
-    def nodes() -> Dict[str, Any]:
+    def nodes(request: Request) -> Dict[str, Any]:
+        provided = _extract_header_key(request)
+        state._require_key_value(provided)
         return {"nodes": list(state.nodes.values())}
 
     @app.post(f"{RELAY_API_PREFIX}/posts")

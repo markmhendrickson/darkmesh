@@ -15,10 +15,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9000)
-    parser.add_argument("--relay-key", default="")
+    parser.add_argument("--relay-key", default=os.environ.get("DARKMESH_RELAY_KEY", ""))
     args = parser.parse_args()
 
-    os.environ["DARKMESH_RELAY_KEY"] = args.relay_key
+    relay_key = args.relay_key.strip()
+    if not relay_key:
+        raise SystemExit("relay-key is required")
+
+    os.environ["DARKMESH_RELAY_KEY"] = relay_key
 
     uvicorn.run(
         "darkmesh_relay.service:app",

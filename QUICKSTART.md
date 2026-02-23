@@ -2,13 +2,18 @@
 
 Shortest path to run Darkmesh.
 
-## Demo in 6 commands
+## Demo in 9 commands
+
+OpenClaw is **not** required for this local demo.
 
 ```bash
-git clone https://github.com/<owner>/<repo>.git
-cd <repo>
+git clone https://github.com/anandiyer/darkmesh.git
+cd darkmesh
 python3 scripts/darkmesh_setup.py
+python3 scripts/darkmesh_down.py
+rm -f data/node_a/*.enc data/node_b/*.enc data/node_a/darkmesh_listener.cursor data/node_b/darkmesh_listener.cursor
 python3 scripts/darkmesh_up.py --mode demo --relay-key demo-relay-key
+export DARKMESH_NODE_KEY=demo-relay-key
 python3 scripts/darkmesh_demo.py
 python3 scripts/darkmesh_status.py --relay-url http://localhost:9000
 ```
@@ -46,11 +51,17 @@ python3 scripts/darkmesh_up.py --mode join --config config/<node_id>.json
 
 4. Load integrations (pick one):
 
+Set node auth key:
+
+```bash
+export DARKMESH_NODE_KEY=<shared_relay_key_or_node_key>
+```
+
 CSV path:
 
 ```bash
-python3 connectors/contacts_csv.py --url http://localhost:8001 --file /path/to/contacts.csv
-python3 connectors/interactions_csv.py --url http://localhost:8001 --file /path/to/interactions.csv
+python3 connectors/contacts_csv.py --url http://localhost:8001 --file /path/to/contacts.csv --node-key $DARKMESH_NODE_KEY
+python3 connectors/interactions_csv.py --url http://localhost:8001 --file /path/to/interactions.csv --node-key $DARKMESH_NODE_KEY
 ```
 
 OpenClaw autodiscovery path:
@@ -61,13 +72,14 @@ python3 connectors/openclaw_sync.py \
   --url http://localhost:8001 \
   --autodiscover \
   --openclaw-base-url http://localhost:3000 \
-  --self-identifier <email@domain.com>
+  --self-identifier <email@domain.com> \
+  --node-key $DARKMESH_NODE_KEY
 ```
 
 5. Verify integrations are loaded:
 
 ```bash
-python3 scripts/darkmesh_integrations_check.py --url http://localhost:8001 --strict
+python3 scripts/darkmesh_integrations_check.py --url http://localhost:8001 --strict --node-key $DARKMESH_NODE_KEY
 ```
 
 Use from OpenClaw:

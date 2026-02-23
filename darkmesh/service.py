@@ -1,12 +1,15 @@
+import hmac
 import json
 import os
 import threading
 import time
 import uuid
 from typing import Any, Dict, List
+from urllib.parse import urlparse
 
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from darkmesh.models import (
     IngestRequest,
@@ -28,11 +31,30 @@ def _normalize_url(url: str) -> str:
     return url.rstrip("/")
 
 
+def _is_local_url(url: str) -> bool:
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
 def _coerce_strength(value: Any, default: float = 0.5) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _extract_node_key(request: Request) -> str:
+    direct = request.headers.get("x-darkmesh-key", "").strip()
+    if direct:
+        return direct
+
+    auth = request.headers.get("authorization", "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
 
 
 class DarkmeshConfig:
@@ -49,11 +71,18 @@ class DarkmeshConfig:
 
         self.relay_url = _normalize_url(raw.get("relay_url", "")) if raw.get("relay_url") else ""
         self.relay_key = raw.get("relay_key", "")
+        if self.relay_url and not self.relay_key:
+            raise ValueError("relay_key is required when relay_url is configured")
+
+        self.node_key = raw.get("node_key", self.relay_key or os.environ.get("DARKMESH_NODE_KEY", ""))
+        if not self.node_key:
+            raise ValueError("node_key is required")
 
         self.response_wait_seconds = float(raw.get("response_wait_seconds", 5.0))
         self.post_ttl_seconds = int(raw.get("post_ttl_seconds", 30))
         self.required_integrations = raw.get("required_integrations", ["contacts", "interactions"])
         self.warm_intro_session_ttl = float(raw.get("warm_intro_session_ttl", 900.0))
+        self.reveal_token_ttl_seconds = float(raw.get("reveal_token_ttl_seconds", 900.0))
 
 
 def load_config(path: str) -> DarkmeshConfig:
@@ -75,6 +104,11 @@ def create_app() -> FastAPI:
     sessions_lock = threading.Lock()
     warm_intro_sessions: Dict[str, Dict[str, Any]] = {}
 
+    reveal_tokens_lock = threading.Lock()
+    issued_reveal_tokens: Dict[str, Dict[str, Any]] = {}
+
+    public_paths = {f"{NODE_API_PREFIX}/health"}
+
     def cleanup_sessions_locked() -> None:
         now = time.time()
         stale_ids = []
@@ -86,6 +120,17 @@ def create_app() -> FastAPI:
         for request_id in stale_ids:
             warm_intro_sessions.pop(request_id, None)
 
+    def cleanup_reveal_tokens_locked() -> None:
+        now = time.time()
+        ttl = max(60.0, config.reveal_token_ttl_seconds)
+        stale_tokens = []
+        for token, record in issued_reveal_tokens.items():
+            created_at = float(record.get("created_at", 0.0))
+            if now - created_at > ttl:
+                stale_tokens.append(token)
+        for token in stale_tokens:
+            issued_reveal_tokens.pop(token, None)
+
     def self_card() -> Dict[str, Any]:
         return {
             "node_id": config.node_id,
@@ -94,6 +139,9 @@ def create_app() -> FastAPI:
             "capabilities": config.capabilities,
             "relay_url": config.relay_url,
         }
+
+    def node_auth_headers() -> Dict[str, str]:
+        return {"X-Darkmesh-Key": config.node_key}
 
     def publish_to_relay(payload: Dict[str, Any]) -> None:
         if not config.relay_url:
@@ -112,6 +160,18 @@ def create_app() -> FastAPI:
 
     def dataset_count(dataset: str) -> int:
         return len(vault.load(dataset))
+
+    @app.middleware("http")
+    async def auth_middleware(request: Request, call_next):  # type: ignore[override]
+        path = request.url.path
+        if not path.startswith(NODE_API_PREFIX) or path in public_paths:
+            return await call_next(request)
+
+        provided_key = _extract_node_key(request)
+        if not provided_key or not hmac.compare_digest(provided_key, config.node_key):
+            return JSONResponse(status_code=401, content={"detail": "invalid node key"})
+
+        return await call_next(request)
 
     @app.on_event("startup")
     def register_node() -> None:
@@ -278,10 +338,11 @@ def create_app() -> FastAPI:
             pseudonym_id = str(responder.get("pseudonym_id", "unknown"))
             responder_node_id = str(responder.get("node_id", ""))
             responder_url = _normalize_url(str(response.get("responder_url") or responder.get("url") or ""))
+            reveal_token = str(response.get("reveal_token", "")).strip()
 
             if pseudonym_id in seen_pseudonyms:
                 continue
-            if not responder_url:
+            if not responder_url or not reveal_token:
                 continue
 
             seen_pseudonyms.add(pseudonym_id)
@@ -294,6 +355,7 @@ def create_app() -> FastAPI:
                     "responder_url": responder_url,
                     "target_strength": round(target_strength, 3),
                     "local_strength": round(local_strength, 3),
+                    "reveal_token": reveal_token,
                 }
             )
 
@@ -309,6 +371,7 @@ def create_app() -> FastAPI:
                 "responder_node_id": item["responder_node_id"],
                 "responder_url": item["responder_url"],
                 "score": item["score"],
+                "reveal_token": item["reveal_token"],
             }
             candidates.append(
                 {
@@ -372,12 +435,14 @@ def create_app() -> FastAPI:
                 "pseudonym_id": pseudonym_id,
                 "responder_node_id": candidate.get("responder_node_id"),
             },
+            "reveal_token": candidate.get("reveal_token"),
         }
 
         try:
             reveal_resp = requests.post(
                 f"{responder_url}{NODE_API_PREFIX}/skills/warm-intro/reveal",
                 json=reveal_payload,
+                headers=node_auth_headers(),
                 timeout=8,
             )
             reveal_resp.raise_for_status()
@@ -424,8 +489,13 @@ def create_app() -> FastAPI:
 
     @app.post(f"{NODE_API_PREFIX}/skills/warm-intro/psi/respond")
     def warm_intro_psi_respond(payload: Dict[str, Any]) -> Dict[str, Any]:
+        request_id = str(payload.get("request_id", "")).strip()
+        requester_id = str(payload.get("requester_id", "")).strip()
         target = payload.get("target") or {}
         psi = payload.get("psi") or {}
+
+        if not request_id or not requester_id:
+            return {"request_id": request_id or None, "eligible": False}
 
         contacts = vault.load("contacts")
         interactions = vault.load("interactions")
@@ -455,6 +525,15 @@ def create_app() -> FastAPI:
         x_values_b = apply_secret(x_values, secret_b, PRIME)
         y_values_b = blind_items(config.self_identifiers, secret_b, PRIME)
 
+        reveal_token = uuid.uuid4().hex
+        with reveal_tokens_lock:
+            cleanup_reveal_tokens_locked()
+            issued_reveal_tokens[reveal_token] = {
+                "created_at": time.time(),
+                "request_id": request_id,
+                "requester_id": requester_id,
+            }
+
         return {
             "request_id": payload.get("request_id"),
             "eligible": True,
@@ -465,6 +544,7 @@ def create_app() -> FastAPI:
             },
             "responder_url": config.listen_url,
             "target_strength": round(target_strength, 3),
+            "reveal_token": reveal_token,
             "psi": {
                 "protocol": "dh-psi-v1",
                 "p": format(PRIME, "x"),
@@ -475,14 +555,40 @@ def create_app() -> FastAPI:
 
     @app.post(f"{NODE_API_PREFIX}/skills/warm-intro/reveal")
     def warm_intro_reveal(payload: Dict[str, Any]) -> Dict[str, Any]:
-        request_id = str(payload.get("request_id", ""))
+        request_id = str(payload.get("request_id", "")).strip()
         requester_id = str(payload.get("requester_id", "")).strip()
         template = str(payload.get("template", "warm_intro_v1")).strip()
         target = payload.get("target") or {}
         candidate = payload.get("candidate") or {}
+        reveal_token = str(payload.get("reveal_token", "")).strip()
 
         if not requester_id:
             raise HTTPException(status_code=400, detail="requester_id is required")
+        if not reveal_token:
+            return {
+                "request_id": request_id,
+                "approved": False,
+                "reason": "missing_reveal_token",
+            }
+
+        with reveal_tokens_lock:
+            cleanup_reveal_tokens_locked()
+            token_record = issued_reveal_tokens.get(reveal_token)
+            if token_record is None:
+                return {
+                    "request_id": request_id,
+                    "approved": False,
+                    "reason": "invalid_reveal_token",
+                }
+            token_request_id = str(token_record.get("request_id", ""))
+            token_requester_id = str(token_record.get("requester_id", ""))
+            if token_request_id != request_id or token_requester_id != requester_id:
+                return {
+                    "request_id": request_id,
+                    "approved": False,
+                    "reason": "reveal_token_mismatch",
+                }
+            issued_reveal_tokens.pop(reveal_token, None)
 
         try:
             validate_template(template)
@@ -546,7 +652,7 @@ def create_app() -> FastAPI:
             "intro": intro,
         }
 
-    if config.dev_mode:
+    if config.dev_mode and _is_local_url(config.listen_url):
 
         @app.get(f"{NODE_API_PREFIX}/debug/dataset/{{name}}")
         def debug_dataset(name: str) -> Dict[str, Any]:

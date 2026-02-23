@@ -20,6 +20,13 @@ def normalize_url(url: str) -> str:
     return url.rstrip("/")
 
 
+def node_headers(config: Dict[str, Any]) -> Dict[str, str]:
+    token = str(config.get("node_key") or config.get("relay_key") or os.environ.get("DARKMESH_NODE_KEY", "")).strip()
+    if not token:
+        raise SystemExit("node_key missing in config")
+    return {"X-Darkmesh-Key": token}
+
+
 def load_cursor(path: str) -> int:
     if not os.path.exists(path):
         return 0
@@ -47,7 +54,7 @@ def register_node(relay_url: str, config: Dict[str, Any]) -> None:
     resp.raise_for_status()
 
 
-def process_post(local_url: str, post: Dict[str, Any]) -> None:
+def process_post(local_url: str, post: Dict[str, Any], headers: Dict[str, str]) -> None:
     request_id = post.get("request_id")
     requester_url = normalize_url(str(post.get("requester_url", "")))
     response_token = str(post.get("response_token", ""))
@@ -63,6 +70,7 @@ def process_post(local_url: str, post: Dict[str, Any]) -> None:
             "target": post.get("target"),
             "psi": post.get("psi"),
         },
+        headers=headers,
         timeout=8,
     )
     local_resp.raise_for_status()
@@ -77,6 +85,7 @@ def process_post(local_url: str, post: Dict[str, Any]) -> None:
             "response_token": response_token,
             "response": response_payload,
         },
+        headers=headers,
         timeout=8,
     )
     direct_resp.raise_for_status()
@@ -93,6 +102,8 @@ def main() -> None:
     relay_url = normalize_url(str(config.get("relay_url", "")))
     if not relay_url:
         raise SystemExit("relay_url missing in config")
+
+    headers = node_headers(config)
 
     local_url = normalize_url(config.get("listen_url", f"http://localhost:{int(config.get('port', 8001))}"))
     cursor_file = args.cursor_file or os.path.join(config.get("vault_path", "data"), "darkmesh_listener.cursor")
@@ -117,7 +128,7 @@ def main() -> None:
             posts = payload.get("posts", [])
             for post in posts:
                 try:
-                    process_post(local_url, post)
+                    process_post(local_url, post, headers=headers)
                 except requests.RequestException:
                     continue
 

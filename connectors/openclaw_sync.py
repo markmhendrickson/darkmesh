@@ -567,9 +567,22 @@ def build_datasets(
     return contacts, interactions
 
 
-def ingest_dataset(url: str, dataset: str, records: List[Dict[str, Any]], timeout: int) -> Dict[str, Any]:
+def build_node_headers(node_key: str) -> Dict[str, str]:
+    token = node_key.strip()
+    if not token:
+        raise SystemExit("node key is required (pass --node-key or set DARKMESH_NODE_KEY)")
+    return {"X-Darkmesh-Key": token}
+
+
+def ingest_dataset(
+    url: str,
+    dataset: str,
+    records: List[Dict[str, Any]],
+    timeout: int,
+    headers: Dict[str, str],
+) -> Dict[str, Any]:
     payload = {"dataset": dataset, "records": records}
-    resp = requests.post(f"{url.rstrip('/')}/darkmesh/ingest", json=payload, timeout=timeout)
+    resp = requests.post(f"{url.rstrip('/')}/darkmesh/ingest", json=payload, headers=headers, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
@@ -848,6 +861,7 @@ def main() -> None:
     parser.add_argument("--min-strength", type=float, default=0.05, help="Drop contacts below this score")
     parser.add_argument("--max-contacts", type=int, default=5000, help="Maximum contacts to ingest")
     parser.add_argument("--timeout", type=int, default=20)
+    parser.add_argument("--node-key", default=os.environ.get("DARKMESH_NODE_KEY", ""))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -956,8 +970,9 @@ def main() -> None:
         print(json.dumps(preview, indent=2))
         return
 
-    contacts_result = ingest_dataset(args.url, "contacts", contacts, timeout=args.timeout)
-    interactions_result = ingest_dataset(args.url, "interactions", interactions, timeout=args.timeout)
+    node_headers = build_node_headers(args.node_key)
+    contacts_result = ingest_dataset(args.url, "contacts", contacts, timeout=args.timeout, headers=node_headers)
+    interactions_result = ingest_dataset(args.url, "interactions", interactions, timeout=args.timeout, headers=node_headers)
 
     output = {
         "summary": summary,

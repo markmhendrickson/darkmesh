@@ -123,7 +123,7 @@ def main() -> None:
     parser.add_argument("--config")
     parser.add_argument("--venv", default=".venv")
     parser.add_argument("--relay-port", type=int, default=9000)
-    parser.add_argument("--relay-key", default="")
+    parser.add_argument("--relay-key", default=os.environ.get("DARKMESH_RELAY_KEY", ""))
     args = parser.parse_args()
 
     py = venv_python(args.venv)
@@ -132,6 +132,9 @@ def main() -> None:
         sys.exit(1)
 
     if args.mode in {"demo", "local"}:
+        if not args.relay_key.strip():
+            print("--relay-key is required for mode demo/local")
+            sys.exit(1)
         relay_ok = spawn(
             "darkmesh_relay",
             [

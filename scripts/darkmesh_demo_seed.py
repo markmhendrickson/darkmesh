@@ -1,6 +1,8 @@
 import json
+import os
 import sys
 from pathlib import Path
+from typing import Dict
 
 import requests
 
@@ -13,10 +15,17 @@ from connectors.contacts_csv import load_contacts
 from connectors.interactions_csv import load_interactions
 
 
+NODE_KEY = os.environ.get("DARKMESH_NODE_KEY", "demo-relay-key")
+
+
+def auth_headers() -> Dict[str, str]:
+    return {"X-Darkmesh-Key": NODE_KEY}
+
+
 def ingest(base_url: str, csv_path: str) -> None:
     records = load_contacts(csv_path)
     payload = {"dataset": "contacts", "records": records}
-    resp = requests.post(f"{base_url}/darkmesh/ingest", json=payload, timeout=10)
+    resp = requests.post(f"{base_url}/darkmesh/ingest", json=payload, headers=auth_headers(), timeout=10)
     resp.raise_for_status()
     print(json.dumps(resp.json(), indent=2))
 
@@ -24,7 +33,7 @@ def ingest(base_url: str, csv_path: str) -> None:
 def ingest_interactions(base_url: str, csv_path: str) -> None:
     records = load_interactions(csv_path)
     payload = {"dataset": "interactions", "records": records}
-    resp = requests.post(f"{base_url}/darkmesh/ingest", json=payload, timeout=10)
+    resp = requests.post(f"{base_url}/darkmesh/ingest", json=payload, headers=auth_headers(), timeout=10)
     resp.raise_for_status()
     print(json.dumps(resp.json(), indent=2))
 

@@ -18,5 +18,6 @@
   "required_integrations": [
     "contacts",
     "interactions"
-  ]
+  ],
+  "node_key": "demo-relay-key"
 }

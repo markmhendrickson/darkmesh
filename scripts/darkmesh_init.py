@@ -22,7 +22,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--listen-url")
     parser.add_argument("--relay-url", default="http://localhost:9000")
-    parser.add_argument("--relay-key", default="")
+    parser.add_argument("--relay-key", required=True)
+    parser.add_argument("--node-key")
     parser.add_argument("--pseudonym-id")
     parser.add_argument("--self-identifiers", default="")
     parser.add_argument("--required-integrations", default="contacts,interactions")
@@ -34,6 +35,14 @@ def main() -> None:
 
     if os.path.exists(args.output) and not args.force:
         raise SystemExit(f"Config exists: {args.output}. Use --force to overwrite.")
+
+    relay_key = args.relay_key.strip()
+    if not relay_key:
+        raise SystemExit("--relay-key is required")
+
+    node_key = (args.node_key or relay_key).strip()
+    if not node_key:
+        raise SystemExit("node_key is required")
 
     pseudonym_id = args.pseudonym_id or f"p_{args.node_id}"
     self_identifiers = parse_identifiers(args.self_identifiers)
@@ -53,7 +62,8 @@ def main() -> None:
         "port": args.port,
         "listen_url": listen_url,
         "relay_url": args.relay_url.rstrip("/"),
-        "relay_key": args.relay_key,
+        "relay_key": relay_key,
+        "node_key": node_key,
         "response_wait_seconds": args.response_wait_seconds,
         "post_ttl_seconds": args.post_ttl_seconds,
         "required_integrations": required_integrations,

@@ -40,10 +40,18 @@ def check_health(url: str) -> str:
         return "down"
 
 
+def node_headers(node_key: str) -> Dict[str, str]:
+    token = node_key.strip()
+    if not token:
+        return {}
+    return {"X-Darkmesh-Key": token}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config")
     parser.add_argument("--relay-url")
+    parser.add_argument("--node-key", default=os.environ.get("DARKMESH_NODE_KEY", ""))
     args = parser.parse_args()
 
     pid_files = sorted(list_pid_files())
@@ -59,6 +67,8 @@ def main() -> None:
     print("Health:")
 
     relay_url = args.relay_url
+    node_key = args.node_key
+
     if args.config and os.path.exists(args.config):
         config = load_config(args.config)
         port = int(config.get("port", 8001))
@@ -68,9 +78,16 @@ def main() -> None:
         if not relay_url:
             relay_url = config.get("relay_url")
 
+        if not node_key:
+            node_key = str(config.get("node_key") or config.get("relay_key") or "")
+
         integration_url = darkmesh_url + NODE_API_PREFIX + "/integrations/status"
         try:
-            integration_resp = requests.get(integration_url, timeout=2)
+            integration_resp = requests.get(
+                integration_url,
+                headers=node_headers(node_key),
+                timeout=2,
+            )
             integration_resp.raise_for_status()
             status_payload = integration_resp.json()
             print(f"- integrations_ready: {status_payload.get('ready', False)}")

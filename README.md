@@ -74,10 +74,20 @@ Restart OpenClaw/Codex after skill install.
 
 ## Fastest Local Demo
 
+OpenClaw is **not** required for this local demo.
+
 Start relay + 2 nodes + listeners:
 
 ```bash
+python3 scripts/darkmesh_down.py
+rm -f data/node_a/*.enc data/node_b/*.enc data/node_a/darkmesh_listener.cursor data/node_b/darkmesh_listener.cursor
 python3 scripts/darkmesh_up.py --mode demo --relay-key demo-relay-key
+```
+
+Set demo node key for authenticated node API calls:
+
+```bash
+export DARKMESH_NODE_KEY=demo-relay-key
 ```
 
 Seed sample data + run warm-intro + consent flow:
@@ -119,11 +129,14 @@ python3 scripts/darkmesh_up.py --mode join --config config/my_node.json
 
 ## Load Data (Choose One Path)
 
+Node API auth is required for all endpoints except `/darkmesh/health`. Set `DARKMESH_NODE_KEY` (typically equal to your network relay key) before running connectors or skill workflows.
+
+
 ### Option A: Keep CSV/JSON connector flow
 
 ```bash
-python3 connectors/contacts_csv.py --url http://localhost:8001 --file /path/to/contacts.csv
-python3 connectors/interactions_csv.py --url http://localhost:8001 --file /path/to/interactions.csv
+python3 connectors/contacts_csv.py --url http://localhost:8001 --file /path/to/contacts.csv --node-key $DARKMESH_NODE_KEY
+python3 connectors/interactions_csv.py --url http://localhost:8001 --file /path/to/interactions.csv --node-key $DARKMESH_NODE_KEY
 ```
 
 ### Option B: Auto-sync from OpenClaw-connected integrations
@@ -142,7 +155,8 @@ python3 connectors/openclaw_sync.py \
   --autodiscover \
   --openclaw-base-url http://localhost:3000 \
   --self-identifier me@domain.com \
-  --self-identifier +14155550123
+  --self-identifier +14155550123 \
+  --node-key $DARKMESH_NODE_KEY
 ```
 
 Restrict to specific integrations:
@@ -154,7 +168,8 @@ python3 connectors/openclaw_sync.py \
   --openclaw-base-url http://localhost:3000 \
   --include-source gmail \
   --include-source whatsapp \
-  --self-identifier me@domain.com
+  --self-identifier me@domain.com \
+  --node-key $DARKMESH_NODE_KEY
 ```
 
 Fallback if your OpenClaw events endpoint is custom:
@@ -164,7 +179,8 @@ python3 connectors/openclaw_sync.py \
   --url http://localhost:8001 \
   --events-url http://localhost:3000/api/events \
   --events-header "Authorization=Bearer <token>" \
-  --self-identifier me@domain.com
+  --self-identifier me@domain.com \
+  --node-key $DARKMESH_NODE_KEY
 ```
 
 OpenClaw export files (JSON array or NDJSON) still work:
@@ -173,7 +189,8 @@ OpenClaw export files (JSON array or NDJSON) still work:
 python3 connectors/openclaw_sync.py \
   --url http://localhost:8001 \
   --events-file /path/to/openclaw_events.ndjson \
-  --self-identifier me@domain.com
+  --self-identifier me@domain.com \
+  --node-key $DARKMESH_NODE_KEY
 ```
 
 Dry run preview:
@@ -184,13 +201,14 @@ python3 connectors/openclaw_sync.py \
   --autodiscover \
   --openclaw-base-url http://localhost:3000 \
   --self-identifier me@domain.com \
+  --node-key $DARKMESH_NODE_KEY \
   --dry-run
 ```
 
 ## Verify Integrations Are Ready
 
 ```bash
-python3 scripts/darkmesh_integrations_check.py --url http://localhost:8001 --strict
+python3 scripts/darkmesh_integrations_check.py --url http://localhost:8001 --strict --node-key $DARKMESH_NODE_KEY
 ```
 
 Check node + relay status:
@@ -216,6 +234,7 @@ Start request:
 ```bash
 curl -sS -X POST http://localhost:8001/darkmesh/skills/warm-intro/request \
   -H 'Content-Type: application/json' \
+  -H "X-Darkmesh-Key: $DARKMESH_NODE_KEY" \
   -d '{
     "template": "warm_intro_v1",
     "target": {"company": "Company B", "role": "Business Development"},
@@ -228,6 +247,7 @@ Approve top candidate reveal:
 ```bash
 curl -sS -X POST http://localhost:8001/darkmesh/skills/warm-intro/consent \
   -H 'Content-Type: application/json' \
+  -H "X-Darkmesh-Key: $DARKMESH_NODE_KEY" \
   -d '{
     "request_id": "<request_id>",
     "consent_id": "<consent_id>"

@@ -12,13 +12,24 @@ class EncryptedVault:
         self.key_path = os.path.join(self.root, "vault.key")
         self._fernet = Fernet(self._load_or_create_key())
 
+    def _secure_permissions(self, path: str) -> None:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            # Best-effort on platforms/filesystems that do not support POSIX chmod.
+            pass
+
     def _load_or_create_key(self) -> bytes:
         if os.path.exists(self.key_path):
+            self._secure_permissions(self.key_path)
             with open(self.key_path, "rb") as f:
                 return f.read()
+
         key = Fernet.generate_key()
-        with open(self.key_path, "wb") as f:
+        fd = os.open(self.key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
             f.write(key)
+        self._secure_permissions(self.key_path)
         return key
 
     def _dataset_path(self, name: str) -> str:
@@ -48,4 +59,3 @@ class EncryptedVault:
         existing.extend(records)
         self.store(name, existing)
         return len(existing)
-

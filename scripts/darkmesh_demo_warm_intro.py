@@ -1,9 +1,15 @@
 import json
+import os
 
 import requests
 
 
 NODE_URL = "http://localhost:8001"
+NODE_KEY = os.environ.get("DARKMESH_NODE_KEY", "demo-relay-key")
+
+
+def auth_headers() -> dict:
+    return {"X-Darkmesh-Key": NODE_KEY}
 
 
 def main() -> None:
@@ -12,7 +18,12 @@ def main() -> None:
         "target": {"company": "Company X", "role": "Business Development"},
         "constraints": {"max_candidates": 3, "min_strength": 0.5},
     }
-    resp = requests.post(f"{NODE_URL}/darkmesh/skills/warm-intro/request", json=payload, timeout=20)
+    resp = requests.post(
+        f"{NODE_URL}/darkmesh/skills/warm-intro/request",
+        json=payload,
+        headers=auth_headers(),
+        timeout=20,
+    )
     resp.raise_for_status()
     result = resp.json()
     print(json.dumps(result, indent=2))
@@ -30,7 +41,12 @@ def main() -> None:
         "request_id": result["request_id"],
         "consent_id": consent_id,
     }
-    consent_resp = requests.post(f"{NODE_URL}/darkmesh/skills/warm-intro/consent", json=consent_payload, timeout=20)
+    consent_resp = requests.post(
+        f"{NODE_URL}/darkmesh/skills/warm-intro/consent",
+        json=consent_payload,
+        headers=auth_headers(),
+        timeout=20,
+    )
     consent_resp.raise_for_status()
 
     print()
