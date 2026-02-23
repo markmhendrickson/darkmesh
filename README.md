@@ -1,31 +1,78 @@
-# Darkmesh: Simple Operator Guide
+# Darkmesh
 
-Darkmesh lets OpenClaw nodes share private signals safely for skills like warm-intro.
+Darkmesh is a sovereign data layer for OpenClaw: it lets agents collaborate on private data signals without centralizing raw personal data.
 
-How it works:
-1. Request node posts one request to the relay.
-2. Other nodes run listeners and pull new posts.
-3. Nodes that can fulfill the request respond directly to the requester node.
+## Why This Exists
 
-## 1) Install Darkmesh
+OpenClaw already lets users connect a user's most valuable data sources (email, messaging, calendar, and more). The gap is is safe, reciprocal coordination across users.
+
+Darkmesh is built for that gap:
+- Your raw data stays local on your node.
+- Nodes exchange privacy-preserving signals, not full datasets.
+- Only opt-in nodes can participate.
+- Sensitive reveal steps require explicit consent.
+
+In short: it is designed to create network effects without creating a centralized data honeypot.
+
+## Project Philosophy
+
+- Local-first: data storage and primary computation happen on each participant's node.
+- Privacy-preserving coordination: matching happens through PSI-style exchange and ranked signals.
+- Reciprocal participation: nodes contribute to the network to receive value from the network.
+- Consent-gated reveal: candidate discovery and identity/contact reveal are separate steps.
+- Skill-native UX: operators should run it through OpenClaw prompts, not manual protocol work.
+
+## How It Works (OpenClaw User + Behind The Scenes)
+
+```mermaid
+flowchart LR
+    U["OpenClaw User"] --> UI["OpenClaw Web Interface"]
+    UI --> S["$darkmesh Skill"]
+
+    S --> SYNC["openclaw_sync (autodiscover connected integrations)"]
+    SYNC --> OC["OpenClaw Integrations: Gmail / SMS / WhatsApp / Calendar"]
+    SYNC --> NA["Node A: local encrypted vault + scoring"]
+
+    NA --> R["Darkmesh Relay (post board)"]
+    R --> LB["Node B Listener"]
+    LB --> NB["Node B: local match + PSI response"]
+    NB --> NA
+
+    UI --> C["User approves consent_id"]
+    C --> NA
+    NA --> NB["Reveal request"]
+    NB --> NA["Approved intro details"]
+    NA --> UI
+```
+
+### Warm-intro lifecycle
+
+1. User asks `$darkmesh` to ingest connected OpenClaw sources.
+2. Node A derives `contacts` + `interactions` strengths locally.
+3. Node A posts one warm-intro request to relay.
+4. Other nodes pull request, evaluate locally, return privacy-preserving responses.
+5. Node A ranks candidates and returns `consent_id` values.
+6. User approves one candidate; only then does reveal happen.
+
+## Install
 
 ```bash
-git clone https://github.com/<owner>/<repo>.git
-cd <repo>
+git clone https://github.com/anandiyer/darkmesh.git
+cd darkmesh
 python3 scripts/darkmesh_setup.py
 ```
 
-## 2) Install the OpenClaw skill
+## Install The OpenClaw Skill
 
 ```bash
 python3 /Users/ai/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
-  --repo <owner>/<repo> \
+  --repo anandiyer/darkmesh \
   --path skills/darkmesh
 ```
 
 Restart OpenClaw/Codex after skill install.
 
-## 3) Fastest way to test (single-machine demo)
+## Fastest Local Demo
 
 Start relay + 2 nodes + listeners:
 
@@ -33,7 +80,7 @@ Start relay + 2 nodes + listeners:
 python3 scripts/darkmesh_up.py --mode demo --relay-key demo-relay-key
 ```
 
-Load sample data + run warm-intro demo query:
+Seed sample data + run warm-intro + consent flow:
 
 ```bash
 python3 scripts/darkmesh_demo.py
@@ -51,7 +98,7 @@ Stop everything:
 python3 scripts/darkmesh_down.py
 ```
 
-## 4) Real operator flow (one node)
+## Real Operator Flow (Single Node)
 
 Create node config:
 
@@ -70,7 +117,7 @@ Start node + listener:
 python3 scripts/darkmesh_up.py --mode join --config config/my_node.json
 ```
 
-## 5) Load data (choose one path)
+## Load Data (Choose One Path)
 
 ### Option A: Keep CSV/JSON connector flow
 
@@ -79,9 +126,7 @@ python3 connectors/contacts_csv.py --url http://localhost:8001 --file /path/to/c
 python3 connectors/interactions_csv.py --url http://localhost:8001 --file /path/to/interactions.csv
 ```
 
-### Option B: Auto-sync from OpenClaw-integrated sources
-
-This avoids building your own contacts/interactions JSON. Darkmesh auto-discovers connected OpenClaw integrations (Gmail, SMS, WhatsApp, Calendar, etc.) and derives contacts + interaction strengths.
+### Option B: Auto-sync from OpenClaw-connected integrations
 
 Set OpenClaw token once:
 
@@ -142,7 +187,7 @@ python3 connectors/openclaw_sync.py \
   --dry-run
 ```
 
-## 6) Verify integrations are ready
+## Verify Integrations Are Ready
 
 ```bash
 python3 scripts/darkmesh_integrations_check.py --url http://localhost:8001 --strict
@@ -154,7 +199,7 @@ Check node + relay status:
 python3 scripts/darkmesh_status.py --config config/my_node.json
 ```
 
-## 7) Relay host setup
+## Relay Host Setup
 
 Run one relay host for your network:
 
@@ -164,7 +209,7 @@ python3 scripts/run_darkmesh_relay.py --host 0.0.0.0 --port 9000 --relay-key <sh
 
 All nodes must use the same relay URL + relay key.
 
-## 8) Send warm-intro request + consent reveal
+## Warm Intro Request + Consent Reveal
 
 Start request:
 
@@ -178,7 +223,7 @@ curl -sS -X POST http://localhost:8001/darkmesh/skills/warm-intro/request \
   }'
 ```
 
-Then approve top candidate reveal:
+Approve top candidate reveal:
 
 ```bash
 curl -sS -X POST http://localhost:8001/darkmesh/skills/warm-intro/consent \
@@ -189,13 +234,13 @@ curl -sS -X POST http://localhost:8001/darkmesh/skills/warm-intro/consent \
   }'
 ```
 
-## 9) Use from OpenClaw prompt
+## Example OpenClaw Prompt
 
 ```text
 Use $darkmesh to autodiscover all OpenClaw-connected integrations, ingest them into node http://localhost:8001, use OPENCLAW_TOKEN from env, run dry-run first, then run real ingest.
 ```
 
-## Main scripts
+## Main Scripts
 
 - `scripts/darkmesh_setup.py`: install dependencies
 - `scripts/darkmesh_up.py`: start relay/nodes/listeners
@@ -208,13 +253,13 @@ Use $darkmesh to autodiscover all OpenClaw-connected integrations, ingest them i
 - `scripts/run_darkmesh_relay.py`: relay host
 - `scripts/run_darkmesh.py`: node API host
 
-## Main connectors
+## Main Connectors
 
 - `connectors/contacts_csv.py`: ingest contacts from CSV
 - `connectors/interactions_csv.py`: ingest interactions from CSV
 - `connectors/openclaw_sync.py`: derive contacts/interactions from OpenClaw sources (autodiscovery, API URL, or file)
 
-## Current limitations
+## Current Limitations
 
 - Prototype quality (not production hardened)
 - OpenClaw API autodiscovery uses common endpoint conventions; override paths if your deployment differs
