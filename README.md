@@ -4,7 +4,7 @@ Darkmesh is a sovereign data layer for OpenClaw: it lets agents collaborate on p
 
 ## Why This Exists
 
-OpenClaw already lets users connect a user's most valuable data sources (email, messaging, calendar, and more). The gap is is safe, reciprocal coordination across users.
+OpenClaw already lets users connect a user's most valuable data sources (email, messaging, calendar, and more). The gap that exists today is safe, reciprocal coordination of this private data across users.
 
 Darkmesh is built for that gap:
 - Your raw data stays local on your node.
