@@ -183,7 +183,7 @@ flowchart LR
 
 ## Public site
 
-Landing page: **[darkmesh.markmhendrickson.com](https://darkmesh.markmhendrickson.com)** (static `site/` via GitHub Actions → GitHub Pages).
+Landing page: **darkmesh.markmhendrickson.com** (static `site/` via GitHub Actions → GitHub Pages). Right after you attach the custom domain, GitHub may still serve the default **`*.github.io`** certificate for a while (`NET::ERR_CERT_COMMON_NAME_INVALID` in Chrome). Until the repo’s TLS certificate leaves **`new`** in the Pages API, use **http://** or wait (often minutes to an hour), then enable **Enforce HTTPS** in Pages settings.
 
 **One-time GitHub:** In this repository, Settings → Pages → Build and deployment → Source: **GitHub Actions**.
 
