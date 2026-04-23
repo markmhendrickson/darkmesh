@@ -187,6 +187,8 @@ Landing page: **[darkmesh.markmhendrickson.com](https://darkmesh.markmhendrickso
 
 **One-time GitHub:** In this repository, Settings → Pages → Build and deployment → Source: **GitHub Actions**.
 
+If the **Deploy GitHub Pages** workflow fails on **Setup Pages** with “Get Pages site failed” / `Not Found`, Pages was not enabled for Actions yet. Turn on **GitHub Actions** as the Pages source first, then **Actions → Deploy GitHub Pages → Run workflow** (or push a change under `site/`).
+
 **DNS:** `markmhendrickson.com` is delegated to **Cloudflare** nameservers, so the record GitHub checks must live in **Cloudflare** (not only in DNSimple): `CNAME` **darkmesh** → **markmhendrickson.github.io**, **DNS only** (proxy off). A duplicate CNAME may also exist in DNSimple for registrar/zone parity; it does not affect resolution until nameservers point at DNSimple.
 
 ## Status of this repo
