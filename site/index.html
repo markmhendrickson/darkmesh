@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Darkmesh</title>
+    <meta
+      name="description"
+      content="Darkmesh is a sovereign data layer for agent collaboration: local-first signals, privacy-preserving coordination, consent-gated reveal."
+    />
+    <style>
+      :root {
+        color-scheme: dark light;
+        --bg: #0c0d10;
+        --fg: #e8eaef;
+        --muted: #9aa3b2;
+        --accent: #7eb8ff;
+        --border: #252830;
+        --max: 40rem;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f6f7f9;
+          --fg: #12141a;
+          --muted: #5c6575;
+          --accent: #1a5fb4;
+          --border: #d8dce6;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+          Helvetica, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        line-height: 1.55;
+        padding: clamp(1.5rem, 4vw, 3rem);
+      }
+      main {
+        max-width: var(--max);
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: clamp(1.75rem, 4vw, 2.25rem);
+        font-weight: 650;
+        letter-spacing: -0.02em;
+        margin: 0 0 0.35em;
+      }
+      .tagline {
+        font-size: 1.125rem;
+        color: var(--muted);
+        margin: 0 0 1.75rem;
+      }
+      p {
+        margin: 0 0 1rem;
+      }
+      ul {
+        margin: 0 0 1.25rem;
+        padding-left: 1.2rem;
+        color: var(--muted);
+      }
+      li {
+        margin-bottom: 0.35rem;
+      }
+      nav {
+        margin-top: 2rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid var(--border);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem 1.25rem;
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Darkmesh</h1>
+      <p class="tagline">
+        A sovereign data layer for agent collaboration: private signals,
+        not centralized raw data.
+      </p>
+      <p>
+        Nodes coordinate on constrained signals while personal context stays
+        local. Discovery and identity reveal are separate, consent-gated steps.
+      </p>
+      <ul>
+        <li>Local-first data on each operator&rsquo;s node</li>
+        <li>Privacy-preserving coordination across peers</li>
+        <li>Optional <strong>Neotoma</strong> fork integration as the local graph substrate</li>
+      </ul>
+      <nav>
+        <a href="https://github.com/markmhendrickson/darkmesh">Source on GitHub</a>
+        <a href="https://github.com/markmhendrickson/darkmesh/blob/main/README.md">README</a>
+        <a href="https://github.com/markmhendrickson/darkmesh/blob/main/docs/neotoma_integration.md"
+          >Neotoma integration</a
+        >
+        <a href="https://markmhendrickson.com/">markmhendrickson.com</a>
+      </nav>
+    </main>
+  </body>
+</html>

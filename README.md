@@ -181,6 +181,14 @@ flowchart LR
 5. Public/admin web experience (upstream): [darkmesh-dev](https://github.com/anandiyer/darkmesh-dev)
 6. API/schema references (upstream): [darkmesh-contracts](https://github.com/anandiyer/darkmesh-contracts)
 
+## Public site
+
+Landing page: **[darkmesh.markmhendrickson.com](https://darkmesh.markmhendrickson.com)** (static `site/` via GitHub Actions → GitHub Pages).
+
+**One-time GitHub:** In this repository, Settings → Pages → Build and deployment → Source: **GitHub Actions**.
+
+**DNS:** `CNAME` hostname `darkmesh` → `markmhendrickson.github.io` (same pattern as other `*.markmhendrickson.com` subdomains on GitHub Pages).
+
 ## Status of this repo
 
 This fork is maintained as:
