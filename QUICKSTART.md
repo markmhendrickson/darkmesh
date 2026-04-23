@@ -2,6 +2,11 @@
 
 Shortest path to run Darkmesh.
 
+> Looking for the Neotoma-backed setup (live contact store + AAuth
+> writeback)? See [docs/neotoma_integration.md](docs/neotoma_integration.md).
+> The quickstart below runs the default vault-backed node, which still
+> works identically in this fork.
+
 ## Demo in 9 commands
 
 OpenClaw is **not** required for this local demo.
