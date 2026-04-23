@@ -187,7 +187,7 @@ Landing page: **[darkmesh.markmhendrickson.com](https://darkmesh.markmhendrickso
 
 **One-time GitHub:** In this repository, Settings → Pages → Build and deployment → Source: **GitHub Actions**.
 
-**DNS:** `CNAME` hostname `darkmesh` → `markmhendrickson.github.io` (same pattern as other `*.markmhendrickson.com` subdomains on GitHub Pages).
+**DNS (DNSimple):** Zone `markmhendrickson.com` — `CNAME` **darkmesh** → **markmhendrickson.github.io** (GitHub Pages). Managed in [DNSimple](https://dnsimple.com); record created for this subdomain.
 
 ## Status of this repo
 
