@@ -1,0 +1,28 @@
+{
+  "node_id": "mark_local",
+  "vault_path": "data/mark_local",
+  "self_identifiers": [
+    "markmhendrickson@gmail.com"
+  ],
+  "pseudonym_id": "p_mark_local",
+  "capabilities": [
+    "warm_intro_v1"
+  ],
+  "dev_mode": true,
+  "port": 8001,
+  "listen_url": "http://localhost:8001",
+  "relay_url": "http://127.0.0.1:9000",
+  "relay_key": "local-dev-relay-key",
+  "node_key": "local-dev-relay-key",
+  "response_wait_seconds": 5.0,
+  "post_ttl_seconds": 30,
+  "required_integrations": [
+    "contacts",
+    "interactions"
+  ],
+  "neotoma_url": "http://localhost:3080",
+  "neotoma_token": "",
+  "neotoma_entity_type": "contact",
+  "neotoma_max_entities": 2000,
+  "neotoma_cache_ttl_seconds": 15.0
+}

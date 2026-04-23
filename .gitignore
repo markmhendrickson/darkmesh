@@ -11,3 +11,5 @@ data/*/vault.key
 data/*/*.enc
 data/*/darkmesh_listener.cursor
 .DS_Store
+secrets/*.jwk
+secrets/*_private*

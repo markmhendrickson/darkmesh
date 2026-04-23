@@ -1,16 +1,20 @@
+import hashlib
 import hmac
 import json
+import logging
 import os
 import threading
 import time
 import uuid
-from typing import Any, Dict, List
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from darkmesh.aauth_signer import SignerConfig, SignerConfigError, load_signer_config_from_env, signed_post
 from darkmesh.models import (
     IngestRequest,
     WarmIntroConsentRequest,
@@ -18,9 +22,13 @@ from darkmesh.models import (
     WarmIntroRequest,
     WarmIntroResponse,
 )
+from darkmesh.neotoma_client import NeotomaClient, contact_live_strength, entity_to_contact
 from darkmesh.policy import PolicyError, match_target, validate_constraints, validate_template
 from darkmesh.psi import PRIME, apply_secret, blind_items, decode_values, encode_values, generate_secret
 from darkmesh.vault import EncryptedVault
+
+
+logger = logging.getLogger(__name__)
 
 
 NODE_API_PREFIX = "/darkmesh"
@@ -84,6 +92,18 @@ class DarkmeshConfig:
         self.warm_intro_session_ttl = float(raw.get("warm_intro_session_ttl", 900.0))
         self.reveal_token_ttl_seconds = float(raw.get("reveal_token_ttl_seconds", 900.0))
 
+        # Phase 1: optional Neotoma-backed vault. When `neotoma_url` is set,
+        # contact lookups go through the live entity graph instead of the
+        # encrypted flat-file vault. Absent config falls through to the
+        # vault for backward compatibility.
+        self.neotoma_url = _normalize_url(raw.get("neotoma_url", "")) if raw.get("neotoma_url") else ""
+        self.neotoma_token = raw.get(
+            "neotoma_token", os.environ.get("NEOTOMA_TOKEN", "")
+        )
+        self.neotoma_entity_type = raw.get("neotoma_entity_type", "contact")
+        self.neotoma_max_entities = int(raw.get("neotoma_max_entities", 2000))
+        self.neotoma_cache_ttl_seconds = float(raw.get("neotoma_cache_ttl_seconds", 15.0))
+
 
 def load_config(path: str) -> DarkmeshConfig:
     with open(path, "r", encoding="utf-8") as f:
@@ -91,10 +111,241 @@ def load_config(path: str) -> DarkmeshConfig:
     return DarkmeshConfig(raw)
 
 
+class ContactStore:
+    """Source of truth for contacts/interactions during warm-intro eval.
+
+    Wraps the existing :class:`EncryptedVault`. When ``config.neotoma_url`` is
+    configured, reads the contact list from Neotoma's live entity graph and
+    derives the interactions dataset from each contact's provenance signals
+    (observation count, relationship count, recency). A short TTL cache
+    prevents one warm-intro request from hitting Neotoma three times.
+    """
+
+    def __init__(self, config: DarkmeshConfig, vault: EncryptedVault) -> None:
+        self._config = config
+        self._vault = vault
+        self._client: Optional[NeotomaClient] = None
+        if config.neotoma_url:
+            self._client = NeotomaClient(
+                base_url=config.neotoma_url,
+                token=config.neotoma_token,
+                entity_type=config.neotoma_entity_type,
+                max_entities=config.neotoma_max_entities,
+            )
+        self._cache_lock = threading.Lock()
+        self._cache: Dict[str, Any] = {"fetched_at": 0.0, "contacts": None, "interactions": None}
+
+    @property
+    def live(self) -> bool:
+        return self._client is not None
+
+    def _refresh_live_locked(self) -> None:
+        assert self._client is not None
+        entities = self._client.query_entities()
+        contacts: List[Dict[str, Any]] = []
+        interactions: List[Dict[str, Any]] = []
+        for entity in entities:
+            mapped = entity_to_contact(entity)
+            if mapped is None:
+                continue
+            strength = contact_live_strength(mapped)
+            contact_record = {
+                "name": mapped.get("name") or mapped.get("email") or mapped.get("neotoma_entity_id"),
+                "email": mapped.get("email") or "",
+                "org": mapped.get("org") or "",
+                "role": mapped.get("role") or "",
+                "strength": round(strength, 3),
+                "neotoma_entity_id": mapped.get("neotoma_entity_id"),
+            }
+            contacts.append(contact_record)
+            if contact_record["email"]:
+                interactions.append(
+                    {"email": contact_record["email"], "strength": round(strength, 3)}
+                )
+        self._cache = {
+            "fetched_at": time.time(),
+            "contacts": contacts,
+            "interactions": interactions,
+        }
+
+    def _live(self, dataset: str) -> List[Dict[str, Any]]:
+        ttl = max(0.0, self._config.neotoma_cache_ttl_seconds)
+        with self._cache_lock:
+            fresh = (time.time() - float(self._cache.get("fetched_at", 0.0))) < ttl
+            if not fresh or self._cache.get(dataset) is None:
+                try:
+                    self._refresh_live_locked()
+                except requests.RequestException as exc:
+                    logger.warning("Neotoma fetch failed, falling back to vault: %s", exc)
+                    return list(self._vault.load(dataset))
+            return list(self._cache.get(dataset) or [])
+
+    def load(self, dataset: str) -> List[Dict[str, Any]]:
+        if self.live and dataset in {"contacts", "interactions"}:
+            return self._live(dataset)
+        return self._vault.load(dataset)
+
+    def append(self, dataset: str, records: List[Dict[str, Any]]) -> int:
+        # Ingest always targets the local vault. Live Neotoma data is read-only
+        # on this path; writebacks are handled via AAuth in Phase 2.
+        return self._vault.append(dataset, records)
+
+
+class NeotomaWriteback:
+    """Phase 2: AAuth-signed writeback of Darkmesh events to Neotoma.
+
+    A warm-intro reveal is a first-class event worth provenance. When the
+    Darkmesh node has both ``neotoma_url`` and AAuth credentials configured
+    (``DARKMESH_AAUTH_PRIVATE_JWK`` + ``DARKMESH_AAUTH_SUB``), we mint a
+    ``warm_intro_reveal`` entity in Neotoma on every successful reveal. If
+    AAuth isn't configured we no-op silently — the reveal itself always
+    succeeds regardless. Writebacks are also best-effort: transport or
+    verification failures are logged but never propagated to the caller.
+    """
+
+    def __init__(self, config: DarkmeshConfig) -> None:
+        self._config = config
+        self._signer_config: Optional[SignerConfig] = None
+        self._enabled = False
+        if not config.neotoma_url:
+            return
+        try:
+            self._signer_config = load_signer_config_from_env()
+            self._enabled = True
+        except SignerConfigError as exc:
+            logger.info(
+                "Darkmesh AAuth writeback disabled (config missing): %s", exc
+            )
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def _idempotency_key(self, request_id: str, consent_id: str, side: str) -> str:
+        raw = f"{self._config.node_id}:{request_id}:{consent_id}:{side}"
+        return "warm_intro_reveal-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+    def _build_entity(
+        self,
+        *,
+        request_id: str,
+        consent_id: Optional[str],
+        requester_node_id: str,
+        responder_node_id: str,
+        template: str,
+        target: Dict[str, Any],
+        intro: Dict[str, Any],
+        approved: bool,
+        side: str,
+    ) -> Dict[str, Any]:
+        relationship_strength = intro.get("relationship_strength")
+        target_contact = intro.get("target_contact") or {}
+        # Warm-intro targets sometimes use ``company`` (end-user facing) and
+        # sometimes ``org`` (vault schema) interchangeably; accept either and
+        # normalise to ``target_org``.
+        target_org = target.get("org") or target.get("company")
+        raw = {
+            "entity_type": "warm_intro_reveal",
+            "canonical_name": (
+                f"Warm intro {request_id} -> {target_contact.get('name') or 'unknown'}"
+            ),
+            "request_id": request_id,
+            "consent_id": consent_id,
+            "requester_node_id": requester_node_id,
+            "responder_node_id": responder_node_id,
+            "darkmesh_node_id": self._config.node_id,
+            "side": side,
+            "template": template,
+            "approved": bool(approved),
+            "relationship_strength": relationship_strength,
+            "target_org": target_org,
+            "target_role": target.get("role"),
+            "target_contact_name": target_contact.get("name"),
+            "target_contact_org": target_contact.get("org"),
+            "target_contact_role": target_contact.get("role"),
+            "revealed_at": datetime.now(timezone.utc).isoformat(),
+            "data_source": f"darkmesh-node:{self._config.node_id}",
+        }
+        # Drop null-valued fields. Neotoma's reducer computes entity snapshots
+        # by taking the latest non-null value per field; if a brand-new entity
+        # has a field whose only observation is null, the default-schema path
+        # crashes on ``observations[0].fields[field]`` (empty filtered list).
+        # See src/reducers/observation_reducer.ts. Required identity keys
+        # (entity_type, canonical_name) are never null.
+        return {k: v for k, v in raw.items() if v is not None}
+
+    def record_reveal(
+        self,
+        *,
+        request_id: str,
+        consent_id: Optional[str],
+        requester_node_id: str,
+        responder_node_id: str,
+        template: str,
+        target: Dict[str, Any],
+        intro: Dict[str, Any],
+        approved: bool,
+        side: str,
+    ) -> None:
+        if not self._enabled or self._signer_config is None:
+            return
+        if not approved:
+            return
+        entity = self._build_entity(
+            request_id=request_id,
+            consent_id=consent_id,
+            requester_node_id=requester_node_id,
+            responder_node_id=responder_node_id,
+            template=template,
+            target=target or {},
+            intro=intro or {},
+            approved=approved,
+            side=side,
+        )
+        payload = {
+            "entities": [entity],
+            "idempotency_key": self._idempotency_key(
+                request_id, consent_id or "_", side
+            ),
+            "source_priority": 90,
+        }
+        try:
+            response = signed_post(
+                f"{self._config.neotoma_url}/store",
+                payload,
+                config=self._signer_config,
+                timeout=10,
+            )
+        except Exception as exc:  # noqa: BLE001 -- best-effort writeback
+            logger.warning("Neotoma writeback failed (%s): %s", side, exc)
+            return
+        if response.status_code >= 400:
+            logger.warning(
+                "Neotoma writeback rejected (%s, status=%s): %s",
+                side,
+                response.status_code,
+                response.text[:500],
+            )
+        else:
+            logger.info(
+                "Neotoma writeback stored warm_intro_reveal (%s, request_id=%s)",
+                side,
+                request_id,
+            )
+
+
 def create_app() -> FastAPI:
     config_path = os.environ.get("DARKMESH_CONFIG", "config/node_a.json")
     config = load_config(config_path)
     vault = EncryptedVault(config.vault_path)
+    store = ContactStore(config, vault)
+    writeback = NeotomaWriteback(config)
+    if writeback.enabled:
+        logger.info(
+            "Darkmesh AAuth writeback enabled -> %s (node=%s)",
+            config.neotoma_url,
+            config.node_id,
+        )
 
     app = FastAPI(title=f"Darkmesh Node {config.node_id}")
 
@@ -159,7 +410,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=502, detail=f"Relay error: {exc}") from exc
 
     def dataset_count(dataset: str) -> int:
-        return len(vault.load(dataset))
+        return len(store.load(dataset))
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):  # type: ignore[override]
@@ -219,7 +470,7 @@ def create_app() -> FastAPI:
 
     @app.post(f"{NODE_API_PREFIX}/ingest")
     def ingest(request: IngestRequest) -> Dict[str, Any]:
-        count = vault.append(request.dataset, request.records)
+        count = store.append(request.dataset, request.records)
         return {"dataset": request.dataset, "count": count}
 
     @app.post(f"{NODE_API_PREFIX}/skills/warm-intro/request", response_model=WarmIntroResponse)
@@ -463,6 +714,19 @@ def create_app() -> FastAPI:
                 if live_candidate is not None:
                     live_candidate["reveal_result"] = result
 
+        if approved and result.get("intro"):
+            writeback.record_reveal(
+                request_id=request.request_id,
+                consent_id=request.consent_id,
+                requester_node_id=config.node_id,
+                responder_node_id=str(candidate.get("responder_node_id") or ""),
+                template=template,
+                target=target,
+                intro=result.get("intro") or {},
+                approved=True,
+                side="requester",
+            )
+
         return WarmIntroConsentResponse(
             request_id=request.request_id,
             consent_id=request.consent_id,
@@ -645,6 +909,18 @@ def create_app() -> FastAPI:
             "relationship_strength": round(best_strength, 3),
             "next_step": "Ask connector to forward an intro to the target contact.",
         }
+
+        writeback.record_reveal(
+            request_id=request_id,
+            consent_id=None,
+            requester_node_id=requester_id,
+            responder_node_id=config.node_id,
+            template=template,
+            target=target,
+            intro=intro,
+            approved=True,
+            side="responder",
+        )
 
         return {
             "request_id": request_id,

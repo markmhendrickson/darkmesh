@@ -1,0 +1,17 @@
+{
+  "_comment": "Neotoma agent-capability registry override for the Darkmesh AAuth writeback. Point your Neotoma server at this file via NEOTOMA_AGENT_CAPABILITIES_FILE=<abs path>, then set NEOTOMA_AGENT_CAPABILITIES_ENFORCE=true so unscoped writes are denied. The sub below matches the JWT claim Darkmesh mints (DARKMESH_AAUTH_SUB); keep them in sync per node.",
+  "default_deny": false,
+  "agents": {
+    "darkmesh-node@mark_local": {
+      "match": {
+        "sub": "darkmesh-node@mark_local",
+        "iss": "https://darkmesh.local"
+      },
+      "capabilities": [
+        { "op": "store_structured", "entity_types": ["warm_intro_reveal", "warm_intro_request", "network_signal"] },
+        { "op": "create_relationship", "entity_types": ["warm_intro_reveal", "contact"] },
+        { "op": "retrieve", "entity_types": ["contact", "warm_intro_reveal"] }
+      ]
+    }
+  }
+}
