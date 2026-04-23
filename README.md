@@ -181,15 +181,16 @@ flowchart LR
 5. Public/admin web experience (upstream): [darkmesh-dev](https://github.com/anandiyer/darkmesh-dev)
 6. API/schema references (upstream): [darkmesh-contracts](https://github.com/anandiyer/darkmesh-contracts)
 
-## Public site
+## Public hostname (`darkmesh.markmhendrickson.com`)
 
-Landing page: **darkmesh.markmhendrickson.com** (static `site/` via GitHub Actions → GitHub Pages). Right after you attach the custom domain, GitHub may still serve the default **`*.github.io`** certificate for a while (`NET::ERR_CERT_COMMON_NAME_INVALID` in Chrome). Until the repo’s TLS certificate leaves **`new`** in the Pages API, use **http://** or wait (often minutes to an hour), then enable **Enforce HTTPS** in Pages settings.
+You can use the name in two different ways (not both at once on the same DNS name):
 
-**One-time GitHub:** In this repository, Settings → Pages → Build and deployment → Source: **GitHub Actions**.
+1. **Static brochure (GitHub Pages).** Deploy the `site/` folder via Actions; DNS was historically a **DNS-only** `CNAME` to `markmhendrickson.github.io`.
+2. **Live node via Cloudflare Tunnel (typical for operators).** Run the FastAPI node locally (default **`:8001`** — see `scripts/run_darkmesh.py` / `darkmesh_up.py`), add an **ingress** rule on your named tunnel, e.g. `darkmesh.markmhendrickson.com` → `http://127.0.0.1:8001`, and point DNS at the tunnel: **proxied** `CNAME` **darkmesh** → `<tunnel-id>.cfargotunnel.com`. Restart `cloudflared` after editing config. Remove the custom domain from this repo’s **GitHub Pages** settings if you switch DNS to the tunnel so GitHub stops issuing certs for that host.
 
-If the **Deploy GitHub Pages** workflow fails on **Setup Pages** with “Get Pages site failed” / `Not Found`, Pages was not enabled for Actions yet. Turn on **GitHub Actions** as the Pages source first, then **Actions → Deploy GitHub Pages → Run workflow** (or push a change under `site/`).
+**One-time GitHub (Pages path only):** Settings → Pages → Source: **GitHub Actions**. If **Setup Pages** returns `Not Found`, enable Pages for Actions first, then **Actions → Deploy GitHub Pages → Run workflow**.
 
-**DNS:** `markmhendrickson.com` is delegated to **Cloudflare** nameservers, so the record GitHub checks must live in **Cloudflare** (not only in DNSimple): `CNAME` **darkmesh** → **markmhendrickson.github.io**, **DNS only** (proxy off). A duplicate CNAME may also exist in DNSimple for registrar/zone parity; it does not affect resolution until nameservers point at DNSimple.
+**DNS:** The zone uses **Cloudflare** nameservers; live DNS edits belong in **Cloudflare** (authoritative). A **DNSimple** copy of the same name does nothing until delegation points at DNSimple.
 
 ## Status of this repo
 
