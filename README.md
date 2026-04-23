@@ -187,7 +187,7 @@ Landing page: **[darkmesh.markmhendrickson.com](https://darkmesh.markmhendrickso
 
 **One-time GitHub:** In this repository, Settings → Pages → Build and deployment → Source: **GitHub Actions**.
 
-**DNS (DNSimple):** Zone `markmhendrickson.com` — `CNAME` **darkmesh** → **markmhendrickson.github.io** (GitHub Pages). Managed in [DNSimple](https://dnsimple.com); record created for this subdomain.
+**DNS:** `markmhendrickson.com` is delegated to **Cloudflare** nameservers, so the record GitHub checks must live in **Cloudflare** (not only in DNSimple): `CNAME` **darkmesh** → **markmhendrickson.github.io**, **DNS only** (proxy off). A duplicate CNAME may also exist in DNSimple for registrar/zone parity; it does not affect resolution until nameservers point at DNSimple.
 
 ## Status of this repo
 
