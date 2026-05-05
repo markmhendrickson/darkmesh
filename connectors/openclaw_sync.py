@@ -12,6 +12,20 @@ from urllib.parse import urlencode
 
 import requests
 
+from connectors._auth import ConnectorAuth, add_auth_arguments
+
+
+CONNECTOR_SUB_PREFIX = "connector-openclaw-sync"
+
+
+def _default_connector_sub() -> str:
+    operator = (
+        os.environ.get("DARKMESH_NODE_ID")
+        or os.environ.get("DARKMESH_OPERATOR")
+        or "local"
+    )
+    return f"{CONNECTOR_SUB_PREFIX}@{operator}"
+
 
 DEFAULT_CHANNEL_WEIGHTS: Dict[str, float] = {
     "gmail": 1.0,
@@ -567,22 +581,15 @@ def build_datasets(
     return contacts, interactions
 
 
-def build_node_headers(node_key: str) -> Dict[str, str]:
-    token = node_key.strip()
-    if not token:
-        raise SystemExit("node key is required (pass --node-key or set DARKMESH_NODE_KEY)")
-    return {"X-Darkmesh-Key": token}
-
-
 def ingest_dataset(
     url: str,
     dataset: str,
     records: List[Dict[str, Any]],
     timeout: int,
-    headers: Dict[str, str],
+    auth: ConnectorAuth,
 ) -> Dict[str, Any]:
     payload = {"dataset": dataset, "records": records}
-    resp = requests.post(f"{url.rstrip('/')}/darkmesh/ingest", json=payload, headers=headers, timeout=timeout)
+    resp = auth.post(f"{url.rstrip('/')}/darkmesh/ingest", payload, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
@@ -861,7 +868,7 @@ def main() -> None:
     parser.add_argument("--min-strength", type=float, default=0.05, help="Drop contacts below this score")
     parser.add_argument("--max-contacts", type=int, default=5000, help="Maximum contacts to ingest")
     parser.add_argument("--timeout", type=int, default=20)
-    parser.add_argument("--node-key", default=os.environ.get("DARKMESH_NODE_KEY", ""))
+    add_auth_arguments(parser, default_sub=_default_connector_sub())
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -970,9 +977,9 @@ def main() -> None:
         print(json.dumps(preview, indent=2))
         return
 
-    node_headers = build_node_headers(args.node_key)
-    contacts_result = ingest_dataset(args.url, "contacts", contacts, timeout=args.timeout, headers=node_headers)
-    interactions_result = ingest_dataset(args.url, "interactions", interactions, timeout=args.timeout, headers=node_headers)
+    auth = ConnectorAuth.from_args(args, default_sub=_default_connector_sub())
+    contacts_result = ingest_dataset(args.url, "contacts", contacts, timeout=args.timeout, auth=auth)
+    interactions_result = ingest_dataset(args.url, "interactions", interactions, timeout=args.timeout, auth=auth)
 
     output = {
         "summary": summary,

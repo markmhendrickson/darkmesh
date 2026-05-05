@@ -38,7 +38,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import requests
 from cryptography.hazmat.primitives import serialization
@@ -199,19 +199,52 @@ def _private_key_for_sign(private_jwk: Dict[str, Any]) -> Tuple[Any, str]:
     return private, "ed25519"
 
 
-def signed_post(
+# Components covered for body-bearing requests (POST/PUT/PATCH). Matches
+# hellocoop's ``DEFAULT_COMPONENTS_BODY`` profile that Neotoma's verifier
+# uses. ``@path`` is used instead of ``@target-uri`` because the verifier
+# recomputes ``@target-uri`` with a hardcoded ``https://`` prefix, which
+# mismatches when running locally over ``http://``.
+_COVERED_COMPONENTS_BODY: Tuple[str, ...] = (
+    "@method",
+    "@authority",
+    "@path",
+    "content-type",
+    "content-digest",
+    "signature-key",
+)
+
+# Components for bodyless requests (GET/DELETE). ``content-type`` and
+# ``content-digest`` are omitted because there is no request body.
+_COVERED_COMPONENTS_NO_BODY: Tuple[str, ...] = (
+    "@method",
+    "@authority",
+    "@path",
+    "signature-key",
+)
+
+
+def signed_request(
+    method: str,
     url: str,
-    payload: Dict[str, Any],
     *,
+    json_body: Optional[Any] = None,
+    params: Optional[Mapping[str, Any]] = None,
     config: Optional[SignerConfig] = None,
     timeout: int = 20,
     extra_headers: Optional[Dict[str, str]] = None,
+    covered_components: Optional[Sequence[str]] = None,
 ) -> requests.Response:
-    """Sign and POST ``payload`` as JSON to ``url``.
+    """Sign and send an HTTP request with the AAuth profile.
 
-    Covers ``@method``, ``@authority``, ``@path``, ``content-type``,
-    ``content-digest``, and ``signature-key`` — the last is required by
-    Neotoma's verifier (``strictAAuth: true``).
+    Covers ``@method``, ``@authority``, ``@path`` and ``signature-key`` on
+    every request; adds ``content-type`` and ``content-digest`` when a
+    body is present. ``signature-key`` is required by Neotoma's verifier
+    (``strictAAuth: true``).
+
+    ``json_body`` is JSON-encoded with compact separators to keep the
+    digest stable between signing and wire. ``params`` are serialised onto
+    the URL before signing so the ``@path`` component includes the query
+    string the server will see.
 
     Why ``@path`` rather than ``@target-uri``: Neotoma's verifier (via
     ``@hellocoop/httpsig``) recomputes ``@target-uri`` with a hardcoded
@@ -221,27 +254,34 @@ def signed_post(
     and matches hellocoop's ``DEFAULT_COMPONENTS_BODY`` profile.
     """
     cfg = config or load_signer_config_from_env()
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    digest = _content_digest(body)
     agent_jwt = mint_agent_token_jwt(cfg)
     thumbprint = jwk_thumbprint(cfg.private_jwk)
 
+    method_upper = method.upper()
+    headers: Dict[str, str] = {
+        "accept": "application/json",
+        # RFC 8941 Structured Field Dictionary. The label (``aasig``) must
+        # match the signature label below; the ``jwt`` scheme carries the
+        # full ``aa-agent+jwt`` token whose ``cnf.jwk`` claim is the
+        # public key Neotoma will use to verify this HTTP signature.
+        "signature-key": f'aasig=jwt;jwt="{agent_jwt}"',
+    }
+
+    body: Optional[bytes] = None
+    if json_body is not None:
+        body = json.dumps(json_body, separators=(",", ":")).encode("utf-8")
+        headers["content-type"] = "application/json"
+        headers["content-digest"] = _content_digest(body)
+
+    if extra_headers:
+        headers.update(extra_headers)
+
     req = requests.Request(
-        method="POST",
+        method=method_upper,
         url=url,
         data=body,
-        headers={
-            "content-type": "application/json",
-            "content-digest": digest,
-            # RFC 8941 Structured Field Dictionary. The label (``aasig``)
-            # must match the signature label below; the ``jwt`` scheme
-            # carries the full ``aa-agent+jwt`` token whose ``cnf.jwk``
-            # claim is the public key Neotoma will use to verify this HTTP
-            # signature.
-            "signature-key": f'aasig=jwt;jwt="{agent_jwt}"',
-            "accept": "application/json",
-            **(extra_headers or {}),
-        },
+        params=dict(params) if params else None,
+        headers=headers,
     )
     prepared = req.prepare()
 
@@ -254,23 +294,67 @@ def signed_post(
         signature_algorithm=algorithm_map[alg_name],
         key_resolver=_SingleKeyResolver(private_key),
     )
+    if covered_components is None:
+        components = _COVERED_COMPONENTS_BODY if body is not None else _COVERED_COMPONENTS_NO_BODY
+    else:
+        components = tuple(covered_components)
     signer.sign(
         prepared,
         key_id=thumbprint,
         label="aasig",
-        covered_component_ids=(
-            "@method",
-            "@authority",
-            "@path",
-            "content-type",
-            "content-digest",
-            "signature-key",
-        ),
+        covered_component_ids=components,
     )
 
     session = requests.Session()
-    response = session.send(prepared, timeout=timeout)
-    return response
+    return session.send(prepared, timeout=timeout)
+
+
+def signed_post(
+    url: str,
+    payload: Dict[str, Any],
+    *,
+    config: Optional[SignerConfig] = None,
+    timeout: int = 20,
+    extra_headers: Optional[Dict[str, str]] = None,
+) -> requests.Response:
+    """Sign and POST ``payload`` as JSON to ``url``.
+
+    Thin wrapper over :func:`signed_request` kept for writeback call
+    sites that were pinned to the original signature. New code should
+    prefer :func:`signed_request` directly.
+    """
+    return signed_request(
+        "POST",
+        url,
+        json_body=payload,
+        config=config,
+        timeout=timeout,
+        extra_headers=extra_headers,
+    )
+
+
+def signed_get(
+    url: str,
+    *,
+    params: Optional[Mapping[str, Any]] = None,
+    config: Optional[SignerConfig] = None,
+    timeout: int = 20,
+    extra_headers: Optional[Dict[str, str]] = None,
+) -> requests.Response:
+    """Sign and GET ``url`` with optional query ``params``.
+
+    Used for capability-scoped Neotoma reads (e.g.
+    ``GET /entities/{id}/relationships``) where the bearer token's broad
+    scope is no longer acceptable.
+    """
+    return signed_request(
+        "GET",
+        url,
+        params=params,
+        config=config,
+        timeout=timeout,
+        extra_headers=extra_headers,
+    )
 
 
 def generate_es256_keypair() -> Dict[str, Dict[str, Any]]:

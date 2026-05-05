@@ -1,6 +1,7 @@
 {
-  "_comment": "Neotoma agent-capability registry override for the Darkmesh AAuth writeback. Point your Neotoma server at this file via NEOTOMA_AGENT_CAPABILITIES_FILE=<abs path>, then set NEOTOMA_AGENT_CAPABILITIES_ENFORCE=true so unscoped writes are denied. The sub below matches the JWT claim Darkmesh mints (DARKMESH_AAUTH_SUB); keep them in sync per node.",
-  "default_deny": false,
+  "_comment": "Portable Darkmesh-side seed file describing what each Darkmesh node's Neotoma agent_grant entity should look like. Consumed by `scripts/neotoma_grants_provision.py` (REST against /agents/grants on a running Neotoma) or by `neotoma agents grants import --file <path> --owner-user-id <id>` (Neotoma-side CLI). NOT read by Neotoma at runtime — Neotoma >= 0.9.0 (Stronger AAuth Admission release) sources capabilities exclusively from agent_grant entities and refuses to start if the legacy NEOTOMA_AGENT_CAPABILITIES_* env vars are set. The `match` block tells admission how to recognise this node's signed requests; the `capabilities` block declares the per-op, per-entity-type authorities the resulting grant should hold. `match.sub` MUST equal the DARKMESH_AAUTH_SUB the node mints. See docs/neotoma_integration.md for provisioning paths and upgrade runbook.",
+  "_schema_version": 1,
+  "_neotoma_min_version": "0.9.0",
   "agents": {
     "darkmesh-node@mark_local": {
       "match": {

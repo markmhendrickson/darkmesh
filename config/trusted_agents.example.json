@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "_description": "Example Darkmesh trust registry. Copy to config/trusted_agents.json and register one entry per paired operator / connector. The `thumbprint` is the RFC 7638 JWK thumbprint (emitted by `python -m darkmesh.aauth_signer keygen`). Capability strings are matched literally by the verifier; `*` grants every endpoint.",
+  "agents": [
+    {
+      "label": "mark's laptop node",
+      "thumbprint": "REPLACE_WITH_MARK_NODE_THUMBPRINT",
+      "sub": "darkmesh-node@mark_local",
+      "iss": "https://darkmesh.local",
+      "public_jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "REPLACE",
+        "y": "REPLACE",
+        "alg": "ES256",
+        "use": "sig"
+      },
+      "capabilities": [
+        "relay.register",
+        "relay.list",
+        "relay.publish",
+        "relay.pull",
+        "node.ingest",
+        "node.callback.consent",
+        "node.callback.reveal",
+        "node.query"
+      ]
+    },
+    {
+      "label": "anand's laptop node",
+      "thumbprint": "REPLACE_WITH_ANAND_NODE_THUMBPRINT",
+      "sub": "darkmesh-node@anand_local",
+      "iss": "https://darkmesh.local",
+      "public_jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "REPLACE",
+        "y": "REPLACE",
+        "alg": "ES256",
+        "use": "sig"
+      },
+      "capabilities": [
+        "relay.register",
+        "relay.publish",
+        "relay.pull",
+        "node.callback.consent",
+        "node.callback.reveal"
+      ]
+    },
+    {
+      "label": "mark's CSV connector",
+      "thumbprint": "REPLACE_WITH_CSV_CONNECTOR_THUMBPRINT",
+      "sub": "connector-csv@mark_local",
+      "iss": "https://darkmesh.local",
+      "public_jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "REPLACE",
+        "y": "REPLACE",
+        "alg": "ES256",
+        "use": "sig"
+      },
+      "capabilities": ["node.ingest"]
+    }
+  ]
+}

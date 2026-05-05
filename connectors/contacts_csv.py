@@ -1,10 +1,24 @@
+"""CSV -> Darkmesh contacts ingest connector.
+
+Phase 3: when AAuth env material is configured (or ``--auth-mode aauth``
+is passed), the connector signs its ``POST /darkmesh/ingest`` request
+with RFC 9421 + ``aa-agent+jwt`` under the sub
+``connector-csv-contacts@<operator>`` so the node can authorise the
+connector independently of its own node keypair.
+"""
+
+from __future__ import annotations
+
 import argparse
 import csv
 import json
 import os
 from typing import Dict, List
 
-import requests
+from connectors._auth import ConnectorAuth, add_auth_arguments
+
+
+CONNECTOR_SUB_PREFIX = "connector-csv-contacts"
 
 
 def load_contacts(path: str) -> List[Dict]:
@@ -27,28 +41,26 @@ def load_contacts(path: str) -> List[Dict]:
     return records
 
 
-def node_headers(node_key: str) -> Dict[str, str]:
-    token = node_key.strip()
-    if not token:
-        raise SystemExit("node key is required (pass --node-key or set DARKMESH_NODE_KEY)")
-    return {"X-Darkmesh-Key": token}
+def _default_sub() -> str:
+    operator = (
+        os.environ.get("DARKMESH_NODE_ID")
+        or os.environ.get("DARKMESH_OPERATOR")
+        or "local"
+    )
+    return f"{CONNECTOR_SUB_PREFIX}@{operator}"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True, help="Darkmesh node URL, e.g. http://localhost:8001")
     parser.add_argument("--file", required=True, help="CSV file path")
-    parser.add_argument("--node-key", default=os.environ.get("DARKMESH_NODE_KEY", ""))
+    add_auth_arguments(parser, default_sub=_default_sub())
     args = parser.parse_args()
 
+    auth = ConnectorAuth.from_args(args, default_sub=_default_sub())
     records = load_contacts(args.file)
     payload = {"dataset": "contacts", "records": records}
-    resp = requests.post(
-        f"{args.url}/darkmesh/ingest",
-        json=payload,
-        headers=node_headers(args.node_key),
-        timeout=10,
-    )
+    resp = auth.post(f"{args.url.rstrip('/')}/darkmesh/ingest", payload, timeout=10)
     resp.raise_for_status()
     print(json.dumps(resp.json(), indent=2))
 

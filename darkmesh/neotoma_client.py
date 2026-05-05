@@ -4,6 +4,30 @@ Used by the Darkmesh service layer in Phase 1 to replace the vault as the
 live contacts substrate. Reads only — writes go through the AAuth-signed
 path in :mod:`darkmesh.aauth_signer`.
 
+Three auth modes are supported on the read path:
+
+- ``bearer`` (legacy): sends ``Authorization: Bearer <token>``. Broad
+  scope — Neotoma grants the token access to every entity type it holds.
+  Recommended only for nodes that have not yet migrated to a Neotoma
+  ``agent_grant``.
+- ``aauth`` (preferred): signs each request with the Darkmesh node's
+  AAuth key. Neotoma's admission layer (>= 0.9.0, "Stronger AAuth
+  Admission" release) verifies the signature, looks up an active
+  ``agent_grant`` whose ``match_*`` triple matches the request's
+  identity, and authenticates the request as the grant's owning user
+  with capabilities scoped to the grant. An unprovisioned node is
+  *denied* (``aauth.admitted: false`` from ``GET /session``) rather
+  than silently retaining the legacy default-allow behaviour. The
+  ``NEOTOMA_AGENT_CAPABILITIES_*`` env-var registry that older versions
+  of this client referred to has been removed from Neotoma; provision
+  grants via :file:`scripts/neotoma_grants_provision.py` (REST) or
+  Neotoma's ``neotoma agents grants import`` CLI.
+- ``auto`` (default): uses ``aauth`` when the signer env vars are
+  present, otherwise falls back to ``bearer``. Recommended fallback
+  order for new deployments is ``auto`` → ``aauth`` once the grant has
+  been provisioned, with ``bearer`` reserved for legacy nodes still
+  being migrated.
+
 Entity snapshots are returned as plain dicts. Mapping them onto Darkmesh's
 contact shape is delegated to :func:`darkmesh.neotoma_client.entity_to_contact`
 so the service layer stays oblivious to Neotoma's schema naming.
@@ -11,11 +35,30 @@ so the service layer stays oblivious to Neotoma's schema naming.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
+
+from darkmesh.aauth_signer import (
+    SignerConfig,
+    SignerConfigError,
+    load_signer_config_from_env,
+    signed_get,
+    signed_request,
+)
+
+
+AUTH_MODE_BEARER = "bearer"
+AUTH_MODE_AAUTH = "aauth"
+AUTH_MODE_AUTO = "auto"
+
+_VALID_AUTH_MODES = frozenset({AUTH_MODE_BEARER, AUTH_MODE_AAUTH, AUTH_MODE_AUTO})
+
+
+class NeotomaClientConfigError(RuntimeError):
+    """Raised when the client is asked to use AAuth without a signer."""
 
 
 @dataclass
@@ -25,8 +68,53 @@ class NeotomaClient:
     timeout: int = 15
     entity_type: str = "contact"
     max_entities: int = 2000
+    auth_mode: str = AUTH_MODE_BEARER
+    signer_config: Optional[SignerConfig] = None
+    _resolved_auth_mode: str = field(init=False, repr=False, default=AUTH_MODE_BEARER)
 
-    def _headers(self) -> Dict[str, str]:
+    def __post_init__(self) -> None:
+        mode = (self.auth_mode or AUTH_MODE_BEARER).lower()
+        if mode not in _VALID_AUTH_MODES:
+            raise NeotomaClientConfigError(
+                f"auth_mode must be one of {sorted(_VALID_AUTH_MODES)}; got {self.auth_mode!r}"
+            )
+        self.auth_mode = mode
+        self._resolved_auth_mode = self._resolve_auth_mode()
+
+    def _resolve_auth_mode(self) -> str:
+        """Collapse ``auto`` into a concrete mode.
+
+        ``auto`` prefers AAuth when signer credentials are reachable and
+        falls back to bearer otherwise, so existing deployments keep
+        working without requiring AAuth provisioning. Explicit ``bearer``
+        and ``aauth`` are honoured as given.
+        """
+        if self.auth_mode == AUTH_MODE_AAUTH:
+            if self.signer_config is None:
+                try:
+                    self.signer_config = load_signer_config_from_env()
+                except SignerConfigError as exc:
+                    raise NeotomaClientConfigError(
+                        "auth_mode='aauth' requires DARKMESH_AAUTH_PRIVATE_JWK(_PATH) "
+                        f"and DARKMESH_AAUTH_SUB: {exc}"
+                    ) from exc
+            return AUTH_MODE_AAUTH
+        if self.auth_mode == AUTH_MODE_AUTO:
+            if self.signer_config is not None:
+                return AUTH_MODE_AAUTH
+            try:
+                self.signer_config = load_signer_config_from_env()
+                return AUTH_MODE_AAUTH
+            except SignerConfigError:
+                return AUTH_MODE_BEARER
+        return AUTH_MODE_BEARER
+
+    @property
+    def resolved_auth_mode(self) -> str:
+        """Concrete auth mode in use (``bearer`` or ``aauth``)."""
+        return self._resolved_auth_mode
+
+    def _bearer_headers(self) -> Dict[str, str]:
         headers = {"content-type": "application/json"}
         if self.token:
             headers["authorization"] = f"Bearer {self.token}"
@@ -34,6 +122,46 @@ class NeotomaClient:
 
     def _url(self, path: str) -> str:
         return f"{self.base_url.rstrip('/')}{path}"
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Optional[Any] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> requests.Response:
+        """Single request abstraction used by both reads.
+
+        Routes through ``requests`` for bearer auth and through
+        :mod:`darkmesh.aauth_signer` for AAuth, so the call sites above
+        never have to branch on auth mode.
+        """
+        url = self._url(path)
+        if self._resolved_auth_mode == AUTH_MODE_AAUTH:
+            if method.upper() == "GET":
+                return signed_get(
+                    url,
+                    params=params,
+                    config=self.signer_config,
+                    timeout=self.timeout,
+                )
+            return signed_request(
+                method,
+                url,
+                json_body=json_body,
+                params=params,
+                config=self.signer_config,
+                timeout=self.timeout,
+            )
+        return requests.request(
+            method,
+            url,
+            json=json_body,
+            params=params,
+            headers=self._bearer_headers(),
+            timeout=self.timeout,
+        )
 
     def query_entities(
         self,
@@ -52,12 +180,7 @@ class NeotomaClient:
                 "offset": offset,
                 "include_snapshots": True,
             }
-            resp = requests.post(
-                self._url("/entities/query"),
-                json=payload,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
+            resp = self._request("POST", "/entities/query", json_body=payload)
             resp.raise_for_status()
             body = resp.json() or {}
             entities = body.get("entities") or body.get("results") or []
@@ -70,11 +193,7 @@ class NeotomaClient:
         return collected[:cap]
 
     def get_relationships(self, entity_id: str) -> Dict[str, List[Dict[str, Any]]]:
-        resp = requests.get(
-            self._url(f"/entities/{entity_id}/relationships"),
-            headers=self._headers(),
-            timeout=self.timeout,
-        )
+        resp = self._request("GET", f"/entities/{entity_id}/relationships")
         resp.raise_for_status()
         body = resp.json() or {}
         return {

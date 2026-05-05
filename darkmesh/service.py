@@ -14,7 +14,19 @@ import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from darkmesh.aauth_signer import SignerConfig, SignerConfigError, load_signer_config_from_env, signed_post
+from darkmesh.aauth_signer import (
+    SignerConfig,
+    SignerConfigError,
+    load_signer_config_from_env,
+    signed_get,
+    signed_post,
+)
+from darkmesh.aauth_verify import (
+    AAuthVerifyError,
+    VerifiedAgent,
+    has_aauth_headers,
+    verify_request,
+)
 from darkmesh.models import (
     IngestRequest,
     WarmIntroConsentRequest,
@@ -25,6 +37,7 @@ from darkmesh.models import (
 from darkmesh.neotoma_client import NeotomaClient, contact_live_strength, entity_to_contact
 from darkmesh.policy import PolicyError, match_target, validate_constraints, validate_template
 from darkmesh.psi import PRIME, apply_secret, blind_items, decode_values, encode_values, generate_secret
+from darkmesh.trust_registry import TrustRegistry, load_trust_registry_from_env
 from darkmesh.vault import EncryptedVault
 
 
@@ -33,6 +46,43 @@ logger = logging.getLogger(__name__)
 
 NODE_API_PREFIX = "/darkmesh"
 RELAY_API_PREFIX = "/darkmesh/relay"
+
+
+# Capability strings Darkmesh nodes enforce on AAuth-authed inbound
+# requests. Mirrors the relay's set so operators can reason about one
+# capability matrix per fleet.
+CAPABILITY_NODE_INGEST = "node.ingest"
+CAPABILITY_NODE_CALLBACK_CONSENT = "node.callback.consent"
+CAPABILITY_NODE_CALLBACK_REVEAL = "node.callback.reveal"
+CAPABILITY_NODE_QUERY = "node.query"
+
+
+def _route_capability(path: str, method: str) -> Optional[str]:
+    """Map an inbound path to the AAuth capability it requires.
+
+    Unknown paths return ``None`` so capability enforcement defaults to
+    "allow any authenticated agent" rather than hard-failing — the
+    middleware still requires the signature to verify, so an unknown
+    path is not a silent bypass.
+    """
+    if not path.startswith(NODE_API_PREFIX):
+        return None
+    tail = path[len(NODE_API_PREFIX):]
+    if tail.startswith("/ingest"):
+        return CAPABILITY_NODE_INGEST
+    if tail.startswith("/skills/warm-intro/consent"):
+        return CAPABILITY_NODE_CALLBACK_CONSENT
+    if tail.startswith("/skills/warm-intro/reveal"):
+        return CAPABILITY_NODE_CALLBACK_REVEAL
+    if tail.startswith("/skills/warm-intro/inbox"):
+        return CAPABILITY_NODE_CALLBACK_CONSENT
+    if tail.startswith("/skills/warm-intro/psi/respond"):
+        return CAPABILITY_NODE_CALLBACK_REVEAL
+    if tail.startswith("/skills/warm-intro/request"):
+        return CAPABILITY_NODE_QUERY
+    if tail.startswith("/integrations/status") or tail == "/capabilities" or tail == "/node/card":
+        return CAPABILITY_NODE_QUERY
+    return None
 
 
 def _normalize_url(url: str) -> str:
@@ -77,14 +127,33 @@ class DarkmeshConfig:
         self.port = int(raw.get("port", os.environ.get("DARKMESH_PORT", "8001")))
         self.listen_url = _normalize_url(raw.get("listen_url", f"http://localhost:{self.port}"))
 
+        # Phase 3: node-wide auth_mode controls both inbound middleware
+        # acceptance and outbound client behaviour. ``hmac`` is the
+        # pre-Phase-3 shared-secret flow; ``aauth`` is pure AAuth;
+        # ``either`` accepts/sends either — the migration mode.
+        raw_mode = raw.get("auth_mode") or os.environ.get(
+            "DARKMESH_AUTH_MODE", "either"
+        )
+        auth_mode = str(raw_mode).lower()
+        if auth_mode not in {"hmac", "aauth", "either"}:
+            raise ValueError(
+                f"auth_mode must be 'hmac', 'aauth', or 'either'; got {auth_mode!r}"
+            )
+        self.auth_mode = auth_mode
+        self.trusted_agents_file = raw.get("trusted_agents_file") or os.environ.get(
+            "DARKMESH_TRUSTED_AGENTS_FILE", ""
+        )
+
         self.relay_url = _normalize_url(raw.get("relay_url", "")) if raw.get("relay_url") else ""
         self.relay_key = raw.get("relay_key", "")
-        if self.relay_url and not self.relay_key:
-            raise ValueError("relay_key is required when relay_url is configured")
+        if self.relay_url and not self.relay_key and self.auth_mode == "hmac":
+            raise ValueError(
+                "relay_key is required when relay_url is configured and auth_mode is 'hmac'"
+            )
 
         self.node_key = raw.get("node_key", self.relay_key or os.environ.get("DARKMESH_NODE_KEY", ""))
-        if not self.node_key:
-            raise ValueError("node_key is required")
+        if not self.node_key and self.auth_mode == "hmac":
+            raise ValueError("node_key is required when auth_mode is 'hmac'")
 
         self.response_wait_seconds = float(raw.get("response_wait_seconds", 5.0))
         self.post_ttl_seconds = int(raw.get("post_ttl_seconds", 30))
@@ -104,6 +173,24 @@ class DarkmeshConfig:
         self.neotoma_max_entities = int(raw.get("neotoma_max_entities", 2000))
         self.neotoma_cache_ttl_seconds = float(raw.get("neotoma_cache_ttl_seconds", 15.0))
 
+        # Read-auth selection for the live Neotoma path. ``bearer`` keeps
+        # the pre-Phase-2.5 behaviour; ``aauth`` forces the AAuth-signed
+        # read path so Neotoma can enforce ``retrieve`` capabilities by
+        # ``entity_type``; ``auto`` picks AAuth when signer env vars are
+        # present and falls back to bearer otherwise. Default is ``auto``
+        # so existing bearer-token deployments keep working and AAuth-
+        # provisioned nodes automatically prefer the least-privilege path.
+        raw_read_mode = raw.get("neotoma_read_auth_mode") or os.environ.get(
+            "NEOTOMA_READ_AUTH_MODE", "auto"
+        )
+        read_mode = str(raw_read_mode).lower()
+        if read_mode not in {"bearer", "aauth", "auto"}:
+            raise ValueError(
+                "neotoma_read_auth_mode must be 'bearer', 'aauth', or 'auto'; "
+                f"got {raw_read_mode!r}"
+            )
+        self.neotoma_read_auth_mode = read_mode
+
 
 def load_config(path: str) -> DarkmeshConfig:
     with open(path, "r", encoding="utf-8") as f:
@@ -121,7 +208,13 @@ class ContactStore:
     prevents one warm-intro request from hitting Neotoma three times.
     """
 
-    def __init__(self, config: DarkmeshConfig, vault: EncryptedVault) -> None:
+    def __init__(
+        self,
+        config: DarkmeshConfig,
+        vault: EncryptedVault,
+        *,
+        signer_config: Optional[SignerConfig] = None,
+    ) -> None:
         self._config = config
         self._vault = vault
         self._client: Optional[NeotomaClient] = None
@@ -131,6 +224,14 @@ class ContactStore:
                 token=config.neotoma_token,
                 entity_type=config.neotoma_entity_type,
                 max_entities=config.neotoma_max_entities,
+                auth_mode=config.neotoma_read_auth_mode,
+                signer_config=signer_config,
+            )
+            logger.info(
+                "Neotoma read path: auth_mode=%s (resolved=%s) url=%s",
+                config.neotoma_read_auth_mode,
+                self._client.resolved_auth_mode,
+                config.neotoma_url,
             )
         self._cache_lock = threading.Lock()
         self._cache: Dict[str, Any] = {"fetched_at": 0.0, "contacts": None, "interactions": None}
@@ -334,11 +435,132 @@ class NeotomaWriteback:
             )
 
 
+def _load_node_signer_config(config: DarkmeshConfig) -> Optional[SignerConfig]:
+    """Return the AAuth signer config for outbound Darkmesh calls, or
+    ``None`` when the node is HMAC-only and has no AAuth env vars set.
+
+    Distinct from :class:`NeotomaWriteback`'s signer: the writeback
+    signer only runs when ``neotoma_url`` is configured, whereas the
+    Darkmesh-internal signer runs whenever ``auth_mode`` admits AAuth.
+    """
+    if config.auth_mode == "hmac":
+        return None
+    try:
+        return load_signer_config_from_env()
+    except SignerConfigError as exc:
+        if config.auth_mode == "aauth":
+            raise SignerConfigError(
+                "auth_mode='aauth' requires DARKMESH_AAUTH_PRIVATE_JWK(_PATH) "
+                f"and DARKMESH_AAUTH_SUB: {exc}"
+            ) from exc
+        logger.info(
+            "Darkmesh AAuth signer disabled (config missing); inbound HMAC still accepted: %s",
+            exc,
+        )
+        return None
+
+
+def _log_neotoma_admission_probe(
+    *,
+    neotoma_url: str,
+    signer_config: Optional[SignerConfig],
+) -> None:
+    """Hit Neotoma's ``GET /session`` once at boot and log admission state.
+
+    Diagnostic only — logs a single structured line (``aauth_admission=...``)
+    summarising attribution + admission as reported by Neotoma's
+    Stronger AAuth Admission release. Failures (Neotoma unreachable,
+    signer not configured, older Neotoma without the field) are logged
+    once at INFO level and never propagate; this probe must not block
+    or crash node boot.
+
+    Operators who see ``admitted=false reason=no_match`` should run
+    ``scripts/neotoma_grants_provision.py`` to bind the node's identity
+    to an ``agent_grant``. See ``docs/neotoma_integration.md``.
+    """
+    if not neotoma_url:
+        return
+    if signer_config is None:
+        logger.info(
+            "Neotoma admission probe skipped: AAuth signer not configured "
+            "(set DARKMESH_AAUTH_PRIVATE_JWK[_PATH] + DARKMESH_AAUTH_SUB)."
+        )
+        return
+    target = f"{neotoma_url.rstrip('/')}/session"
+    try:
+        response = signed_get(target, config=signer_config, timeout=5)
+    except (requests.RequestException, SignerConfigError) as exc:
+        logger.info(
+            "Neotoma admission probe failed (transport): %s — proceeding without "
+            "admission diagnostics. See docs/neotoma_integration.md.",
+            exc,
+        )
+        return
+
+    if response.status_code != 200:
+        logger.info(
+            "Neotoma admission probe got HTTP %d from %s — assuming pre-admission "
+            "Neotoma or signed-request rejection. Body: %s",
+            response.status_code,
+            target,
+            response.text[:200],
+        )
+        return
+
+    try:
+        payload = response.json() or {}
+    except ValueError:
+        logger.info(
+            "Neotoma admission probe: %s did not return JSON; skipping.", target
+        )
+        return
+
+    aauth = payload.get("aauth") or {}
+    admitted = bool(aauth.get("admitted"))
+    reason = aauth.get("admission_reason") or aauth.get("reason") or "unknown"
+    grant_id = aauth.get("grant_id") or "-"
+    agent_label = aauth.get("agent_label") or "-"
+    user_id = payload.get("user_id") or aauth.get("user_id") or "-"
+
+    if admitted:
+        logger.info(
+            "Neotoma admission: admitted=true grant_id=%s user_id=%s "
+            "agent_label=%s reason=%s",
+            grant_id,
+            user_id,
+            agent_label,
+            reason,
+        )
+    else:
+        logger.warning(
+            "Neotoma admission: admitted=false reason=%s — provision a grant "
+            "via scripts/neotoma_grants_provision.py "
+            "(see docs/neotoma_integration.md).",
+            reason,
+        )
+
+
 def create_app() -> FastAPI:
     config_path = os.environ.get("DARKMESH_CONFIG", "config/node_a.json")
     config = load_config(config_path)
     vault = EncryptedVault(config.vault_path)
-    store = ContactStore(config, vault)
+
+    trust_registry = load_trust_registry_from_env(
+        "DARKMESH_TRUSTED_AGENTS_FILE",
+        default_path=config.trusted_agents_file or None,
+        allow_missing=True,
+    )
+    if config.auth_mode == "aauth" and len(trust_registry) == 0:
+        raise RuntimeError(
+            "auth_mode='aauth' requires a non-empty trusted_agents_file; set "
+            "trusted_agents_file in config/* or DARKMESH_TRUSTED_AGENTS_FILE"
+        )
+
+    node_signer_config = _load_node_signer_config(config)
+    # Reuse the node signer for Neotoma reads when available so we do not
+    # parse the same JWK twice at startup. The Neotoma client will fall
+    # back to loading its own config from env if this is ``None``.
+    store = ContactStore(config, vault, signer_config=node_signer_config)
     writeback = NeotomaWriteback(config)
     if writeback.enabled:
         logger.info(
@@ -346,6 +568,17 @@ def create_app() -> FastAPI:
             config.neotoma_url,
             config.node_id,
         )
+    if node_signer_config is not None:
+        logger.info(
+            "Darkmesh node AAuth signer enabled sub=%s auth_mode=%s",
+            node_signer_config.sub,
+            config.auth_mode,
+        )
+
+    _log_neotoma_admission_probe(
+        neotoma_url=config.neotoma_url,
+        signer_config=node_signer_config,
+    )
 
     app = FastAPI(title=f"Darkmesh Node {config.node_id}")
 
@@ -392,17 +625,58 @@ def create_app() -> FastAPI:
         }
 
     def node_auth_headers() -> Dict[str, str]:
+        # Legacy HMAC header. The outbound wrappers below prefer the
+        # AAuth signer when configured; this helper is retained for
+        # fallback paths and for hmac-only peers.
         return {"X-Darkmesh-Key": config.node_key}
+
+    def _peer_post(
+        url: str,
+        payload: Dict[str, Any],
+        *,
+        timeout: int = 8,
+    ) -> requests.Response:
+        """POST a JSON payload to a Darkmesh peer (or relay) picking the
+        auth scheme from the current node's ``auth_mode``.
+
+        ``hmac``
+            Falls back to :data:`X-Darkmesh-Key` and the legacy
+            ``relay_key`` body parameter when the callee is the relay.
+        ``aauth`` / ``either`` with signer configured
+            Uses :func:`signed_post`. The body no longer needs to carry
+            ``relay_key``; we still leave it when already present so
+            that an ``auth_mode=either`` peer can verify via HMAC if it
+            has not been AAuth-configured yet.
+        ``either`` without signer configured
+            Falls back to HMAC so the node still works before keys are
+            provisioned.
+        """
+        use_aauth = (
+            config.auth_mode != "hmac" and node_signer_config is not None
+        )
+        if use_aauth:
+            return signed_post(url, payload, config=node_signer_config, timeout=timeout)
+        return requests.post(
+            url,
+            json=payload,
+            headers=node_auth_headers(),
+            timeout=timeout,
+        )
 
     def publish_to_relay(payload: Dict[str, Any]) -> None:
         if not config.relay_url:
             raise HTTPException(status_code=500, detail="relay_url not configured")
         wire_payload = dict(payload)
-        wire_payload["relay_key"] = config.relay_key
+        # Include the HMAC relay_key when we're going to sign, so an
+        # auth_mode=either relay that has not yet been given our public
+        # JWK can still validate the request. The AAuth path ignores
+        # the body field.
+        if config.relay_key:
+            wire_payload.setdefault("relay_key", config.relay_key)
         try:
-            relay_resp = requests.post(
+            relay_resp = _peer_post(
                 f"{config.relay_url}{RELAY_API_PREFIX}/posts",
-                json=wire_payload,
+                wire_payload,
                 timeout=8,
             )
             relay_resp.raise_for_status()
@@ -418,24 +692,82 @@ def create_app() -> FastAPI:
         if not path.startswith(NODE_API_PREFIX) or path in public_paths:
             return await call_next(request)
 
-        provided_key = _extract_node_key(request)
-        if not provided_key or not hmac.compare_digest(provided_key, config.node_key):
-            return JSONResponse(status_code=401, content={"detail": "invalid node key"})
+        signature_present = has_aauth_headers(request.headers)
 
+        # ----- AAuth branch -----
+        if signature_present and config.auth_mode != "hmac":
+            if len(trust_registry) == 0:
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": "AAuth not available: trust registry empty"},
+                )
+            body = await request.body()
+            try:
+                agent = verify_request(
+                    method=request.method,
+                    url=str(request.url),
+                    headers={k: v for k, v in request.headers.items()},
+                    body=body,
+                    trust_registry=trust_registry,
+                )
+            except AAuthVerifyError as exc:
+                logger.warning(
+                    "Darkmesh AAuth verification failed on %s: %s (%s)",
+                    path,
+                    exc.reason,
+                    exc,
+                )
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": f"AAuth verification failed: {exc.reason}",
+                    },
+                )
+            capability = _route_capability(path, request.method)
+            if capability and not agent.has_capability(capability):
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "detail": (
+                            f"agent '{agent.sub}' is not permitted to use "
+                            f"capability '{capability}'"
+                        )
+                    },
+                )
+            request.state.authenticated_agent = agent
+            return await call_next(request)
+
+        # ----- HMAC branch -----
+        if config.auth_mode == "aauth":
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "AAuth signature required"},
+            )
+        provided_key = _extract_node_key(request)
+        if not config.node_key or not provided_key or not hmac.compare_digest(
+            provided_key, config.node_key
+        ):
+            return JSONResponse(status_code=401, content={"detail": "invalid node key"})
+        request.state.authenticated_agent = None
         return await call_next(request)
 
     @app.on_event("startup")
     def register_node() -> None:
         if not config.relay_url:
             return
-        payload = {
-            "relay_key": config.relay_key,
+        payload: Dict[str, Any] = {
             "node_id": config.node_id,
             "url": config.listen_url,
             "capabilities": config.capabilities,
         }
+        if config.relay_key:
+            payload["relay_key"] = config.relay_key
         try:
-            requests.post(f"{config.relay_url}{RELAY_API_PREFIX}/nodes/register", json=payload, timeout=3)
+            _peer_post(
+                f"{config.relay_url}{RELAY_API_PREFIX}/nodes/register",
+                payload,
+                timeout=3,
+            )
         except requests.RequestException:
             pass
 
@@ -690,10 +1022,9 @@ def create_app() -> FastAPI:
         }
 
         try:
-            reveal_resp = requests.post(
+            reveal_resp = _peer_post(
                 f"{responder_url}{NODE_API_PREFIX}/skills/warm-intro/reveal",
-                json=reveal_payload,
-                headers=node_auth_headers(),
+                reveal_payload,
                 timeout=8,
             )
             reveal_resp.raise_for_status()

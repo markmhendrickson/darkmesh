@@ -47,6 +47,7 @@ three progressive, independently-enableable phases:
 | 0     | Sync connector: Neotoma entities → Darkmesh ingest | [`connectors/neotoma_sync.py`](connectors/neotoma_sync.py)                  |
 | 1     | Live contact store: query Neotoma at request time  | [`darkmesh/neotoma_client.py`](darkmesh/neotoma_client.py), `ContactStore` in [`darkmesh/service.py`](darkmesh/service.py) |
 | 2     | AAuth writeback: sign `warm_intro_reveal` events   | [`darkmesh/aauth_signer.py`](darkmesh/aauth_signer.py), `NeotomaWriteback` in [`darkmesh/service.py`](darkmesh/service.py) |
+| 3     | AAuth at the network layer: retire pre-shared relay keys | [`darkmesh/aauth_verify.py`](darkmesh/aauth_verify.py), [`darkmesh/trust_registry.py`](darkmesh/trust_registry.py), [docs/aauth_relay.md](docs/aauth_relay.md) |
 
 ### Problems this fork solves
 
@@ -60,10 +61,12 @@ addresses.
 | Vault contents drift from reality the moment a connector finishes                                      | Warm-intro relevance decays as contacts, roles, and interactions evolve; re-syncing is a manual chore per source           | Phase 1 `ContactStore` reads Neotoma's live entity graph on each request, with a short TTL cache — no re-sync step                            |
 | Strength scores produced by different connectors (CSV, OpenClaw, email) use different scales           | Mixing sources in one vault makes strength untrustworthy; a "0.9" from one path isn't comparable to a "0.9" from another   | `contact_live_strength()` mirrors the connector heuristic (volume + relationships + recency, same weights) so scores are unified by construction |
 | Warm-intro reveals leave no durable, tamper-evident record                                             | Operators can't audit what was revealed, to whom, by which node, under which consent — discovery side effects are ephemeral | Phase 2 writes `warm_intro_reveal` entities with full consent context, signed via RFC 9421 HTTP Message Signatures (`aa-agent+jwt`)           |
-| Agent-to-agent writes to a shared data layer have no authorization model                               | Any agent with network access can overwrite another's data; there's no way to scope OpenClaw to one type and Darkmesh to another | Neotoma's capability registry ([`config/neotoma_agent_capabilities.json`](config/neotoma_agent_capabilities.json)) enforces per-agent, per-op, per-entity-type ACLs |
+| Agent-to-agent writes to a shared data layer have no authorization model                               | Any agent with network access can overwrite another's data; there's no way to scope OpenClaw to one type and Darkmesh to another | Neotoma's first-class `agent_grant` entities (>= 0.9) bind each AAuth identity to a per-op, per-entity-type capability list. This fork ships a [seed file](config/neotoma_agent_capabilities.json) plus [`scripts/neotoma_grants_provision.py`](scripts/neotoma_grants_provision.py) so an operator can stand up the grants idempotently — see [docs/neotoma_integration.md](docs/neotoma_integration.md) for the playbook and the Neotoma <0.9 → ≥0.9 upgrade runbook. |
 | Running against a local Neotoma over `http://` hit a Neotoma signature-base mismatch                   | Signature verification failed under local dev because the verifier hardcoded `https://` when recomputing `@target-uri`     | Signer covers `@path` instead of `@target-uri` — scheme-agnostic and aligned with hellocoop's `DEFAULT_COMPONENTS_BODY`                       |
 | Neotoma's reducer crashed (500) when the first observation of an entity had a `null` field             | Writeback succeeded but the entity ended up with `NO SNAPSHOT`, making the event invisible to queries                      | `_build_entity` drops null-valued fields pre-send; a defensive guard also landed upstream in `ObservationReducer.lastWriteWins`               |
 | Contact data is duplicated between Darkmesh's vault and the operator's other tools ingesting Neotoma   | Every Darkmesh sync is a fresh copy of data Neotoma already has, doubling storage and divergence risk                      | Phase 1 removes the copy — Darkmesh reads the same live entity graph other agents write to                                                    |
+| Pairing two operators required a side-channel handoff of a shared `DARKMESH_RELAY_KEY` / `X-Darkmesh-Key` | The secret ends up in Signal / email / screenshots; revocation rotates every participant; any leak grants full relay access | Phase 3 signs every node ↔ relay, node ↔ peer, and connector ↔ node request with RFC 9421 + `aa-agent+jwt`. Operators exchange only *public* JWKs and add each other to a local trust registry. See [docs/aauth_relay.md](docs/aauth_relay.md) |
+| One relay key granted the same authority to publish, pull, register, and ingest                       | A compromised connector or peer could do anything any other node could do; no per-edge attribution                          | Phase 3 scopes every agent to explicit capabilities (`relay.publish`, `relay.pull`, `node.ingest`, `node.callback.consent`, …); connectors can be revoked without rotating the node's own keypair |
 
 ### Use cases unique to this fork
 
@@ -104,14 +107,29 @@ addresses.
    nodes (each with its own ES256 keypair and `darkmesh-node@<tag>`
    sub) gets per-node provenance on every reveal, with aggregate
    queries ("what did any of my nodes reveal about Company X this
-   quarter?") falling out of ordinary entity queries.
+   quarter?") falling out of ordinary entity queries. With Phase 3,
+   onboarding a new node into the fleet is "publish its public JWK
+   and add it to the trust registry" — no shared relay secret to
+   distribute to each node, and revoking a compromised node is a
+   single-line edit to `config/trusted_agents.json` that hot-reloads
+   without a restart. Pairing with *another* operator's fleet is the
+   same flow: exchange public JWKs, run
+   [`scripts/darkmesh_trust_add.py`](scripts/darkmesh_trust_add.py)
+   on each side, no secrets cross the wire.
+
+See [docs/aauth_relay.md](docs/aauth_relay.md) for the Phase 3
+network-layer AAuth story: threat model, trust registry shape,
+capability matrix, pairing recipe, and migration plan.
 
 See [docs/neotoma_integration.md](docs/neotoma_integration.md) for:
 - Architecture diagram per phase
 - Contact / strength mapping between the two systems
 - Config fields to add to your node (`neotoma_url`, `neotoma_token`, …)
-- AAuth key provisioning, `Signature-Key` format, and capability
-  registration
+- AAuth key provisioning, `Signature-Key` format, and `agent_grant`
+  provisioning (Inspector UI, REST script, or one-shot Neotoma import)
+- Upgrading from Neotoma <0.9 to ≥0.9 (the *Stronger AAuth Admission*
+  release): step-by-step migration off the removed
+  `NEOTOMA_AGENT_CAPABILITIES_*` env vars
 - Full joint-test results
 - Troubleshooting notes (reducer null-field crash, `@target-uri` vs
   `@path`, RFC 8941 `Signature-Key` format)
@@ -126,6 +144,10 @@ python -m darkmesh.aauth_signer keygen \
 
 # Set env (private JWK path, agent sub, agent iss)
 source scripts/aauth_env.sh mark_local
+
+# Phase 2 — bind the node's AAuth identity to a Neotoma agent_grant
+#   (one-time per node, requires the operator's Neotoma user-token)
+NEOTOMA_TOKEN=… python scripts/neotoma_grants_provision.py --auto
 
 # Phase 1 — add to your node config
 #   "neotoma_url": "http://localhost:3080",
@@ -176,21 +198,14 @@ flowchart LR
 
 1. Local demo in 9 commands: [QUICKSTART.md](QUICKSTART.md)
 2. Neotoma integration details: [docs/neotoma_integration.md](docs/neotoma_integration.md)
-3. Runtime and network setup (upstream): [darkmesh-sdl](https://github.com/anandiyer/darkmesh-sdl)
-4. Warm intro behavior and listener (upstream): [darkmesh-skill-warm-intro](https://github.com/anandiyer/darkmesh-skill-warm-intro)
-5. Public/admin web experience (upstream): [darkmesh-dev](https://github.com/anandiyer/darkmesh-dev)
-6. API/schema references (upstream): [darkmesh-contracts](https://github.com/anandiyer/darkmesh-contracts)
-
-## Public hostname (`darkmesh.markmhendrickson.com`)
-
-You can use the name in two different ways (not both at once on the same DNS name):
-
-1. **Static brochure (GitHub Pages).** Deploy the `site/` folder via Actions; DNS was historically a **DNS-only** `CNAME` to `markmhendrickson.github.io`.
-2. **Live node via Cloudflare Tunnel (typical for operators).** Run the FastAPI node locally (default **`:8001`** — see `scripts/run_darkmesh.py` / `darkmesh_up.py`), add an **ingress** rule on your named tunnel, e.g. `darkmesh.markmhendrickson.com` → `http://127.0.0.1:8001`, and point DNS at the tunnel: **proxied** `CNAME` **darkmesh** → `<tunnel-id>.cfargotunnel.com`. Restart `cloudflared` after editing config. Remove the custom domain from this repo’s **GitHub Pages** settings if you switch DNS to the tunnel so GitHub stops issuing certs for that host.
-
-**One-time GitHub (Pages path only):** Settings → Pages → Source: **GitHub Actions**. If **Setup Pages** returns `Not Found`, enable Pages for Actions first, then **Actions → Deploy GitHub Pages → Run workflow**.
-
-**DNS:** The zone uses **Cloudflare** nameservers; live DNS edits belong in **Cloudflare** (authoritative). A **DNSimple** copy of the same name does nothing until delegation points at DNSimple.
+3. Network-layer AAuth (Phase 3): [docs/aauth_relay.md](docs/aauth_relay.md)
+4. Test suite (verifier, trust registry, relay round-trip, ingest
+   gating, grant provisioning): `python -m pytest tests/` — see
+   [docs/aauth_relay.md → Test coverage](docs/aauth_relay.md#test-coverage)
+5. Runtime and network setup (upstream): [darkmesh-sdl](https://github.com/anandiyer/darkmesh-sdl)
+6. Warm intro behavior and listener (upstream): [darkmesh-skill-warm-intro](https://github.com/anandiyer/darkmesh-skill-warm-intro)
+7. Public/admin web experience (upstream): [darkmesh-dev](https://github.com/anandiyer/darkmesh-dev)
+8. API/schema references (upstream): [darkmesh-contracts](https://github.com/anandiyer/darkmesh-contracts)
 
 ## Status of this repo
 

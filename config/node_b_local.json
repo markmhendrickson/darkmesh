@@ -13,6 +13,8 @@
   "listen_url": "http://localhost:8002",
   "relay_url": "http://127.0.0.1:9000",
   "relay_key": "local-dev-relay-key",
+  "auth_mode": "either",
+  "trusted_agents_file": "config/trusted_agents.json",
   "response_wait_seconds": 5.0,
   "post_ttl_seconds": 30,
   "required_integrations": [

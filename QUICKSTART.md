@@ -6,6 +6,13 @@ Shortest path to run Darkmesh.
 > writeback)? See [docs/neotoma_integration.md](docs/neotoma_integration.md).
 > The quickstart below runs the default vault-backed node, which still
 > works identically in this fork.
+>
+> **Already running Neotoma <0.9?** Read the
+> [Upgrading from Neotoma <0.9 to ≥0.9](docs/neotoma_integration.md#upgrading-from-neotoma-09-to-09)
+> runbook before bumping Neotoma — the legacy
+> `NEOTOMA_AGENT_CAPABILITIES_*` env vars are now a hard-fail on boot
+> and Darkmesh nodes need an `agent_grant` provisioned before they can
+> read or write.
 
 ## Demo in 9 commands
 
@@ -68,6 +75,15 @@ CSV path:
 python3 connectors/contacts_csv.py --url http://localhost:8001 --file /path/to/contacts.csv --node-key $DARKMESH_NODE_KEY
 python3 connectors/interactions_csv.py --url http://localhost:8001 --file /path/to/interactions.csv --node-key $DARKMESH_NODE_KEY
 ```
+
+> **Phase 3 (AAuth-signed connector ingest).** All four connectors
+> (`contacts_csv`, `interactions_csv`, `openclaw_sync`, `neotoma_sync`)
+> share an `--auth-mode hmac|aauth|either` flag. With
+> `DARKMESH_AAUTH_PRIVATE_JWK*` exported (see
+> `scripts/aauth_env.sh`) and the connector's public JWK added to the
+> trust registry (`scripts/darkmesh_trust_add.py --capabilities node.ingest`),
+> ingest is signed instead of relying on `--node-key`. See
+> [docs/aauth_relay.md → Connector AAuth](docs/aauth_relay.md#connector-aauth-connectors_authpy).
 
 OpenClaw autodiscovery path:
 

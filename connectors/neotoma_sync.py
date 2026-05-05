@@ -27,6 +27,20 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
+from connectors._auth import ConnectorAuth, add_auth_arguments
+
+
+CONNECTOR_SUB_PREFIX = "connector-neotoma-sync"
+
+
+def _default_connector_sub() -> str:
+    operator = (
+        os.environ.get("DARKMESH_NODE_ID")
+        or os.environ.get("DARKMESH_OPERATOR")
+        or "local"
+    )
+    return f"{CONNECTOR_SUB_PREFIX}@{operator}"
+
 
 DEFAULT_NEOTOMA_URL = "http://localhost:3080"
 DEFAULT_DARKMESH_URL = "http://localhost:8001"
@@ -252,25 +266,17 @@ def fetch_entities(
     return collected[:limit]
 
 
-def node_headers(node_key: str) -> Dict[str, str]:
-    token = node_key.strip()
-    if not token:
-        raise SystemExit("node key is required (pass --node-key or set DARKMESH_NODE_KEY)")
-    return {"X-Darkmesh-Key": token}
-
-
 def ingest_dataset(
     node_url: str,
     dataset: str,
     records: List[Dict[str, Any]],
     timeout: int,
-    headers: Dict[str, str],
+    auth: ConnectorAuth,
 ) -> Dict[str, Any]:
     payload = {"dataset": dataset, "records": records}
-    resp = requests.post(
+    resp = auth.post(
         f"{node_url.rstrip('/')}/darkmesh/ingest",
-        json=payload,
-        headers=headers,
+        payload,
         timeout=timeout,
     )
     resp.raise_for_status()
@@ -350,11 +356,7 @@ def main() -> None:
     parser.add_argument("--min-strength", type=float, default=0.05)
     parser.add_argument("--max-contacts", type=int, default=2000)
     parser.add_argument("--timeout", type=int, default=20)
-    parser.add_argument(
-        "--node-key",
-        default=os.environ.get("DARKMESH_NODE_KEY", ""),
-        help="Darkmesh node key (or set DARKMESH_NODE_KEY)",
-    )
+    add_auth_arguments(parser, default_sub=_default_connector_sub())
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -384,10 +386,10 @@ def main() -> None:
         print(json.dumps(preview, indent=2))
         return
 
-    headers = node_headers(args.node_key)
-    contacts_result = ingest_dataset(args.url, "contacts", contacts, args.timeout, headers)
+    auth = ConnectorAuth.from_args(args, default_sub=_default_connector_sub())
+    contacts_result = ingest_dataset(args.url, "contacts", contacts, args.timeout, auth)
     interactions_result = ingest_dataset(
-        args.url, "interactions", interactions, args.timeout, headers
+        args.url, "interactions", interactions, args.timeout, auth
     )
 
     output = {

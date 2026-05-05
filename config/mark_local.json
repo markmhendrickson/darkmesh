@@ -14,6 +14,8 @@
   "relay_url": "http://127.0.0.1:9000",
   "relay_key": "local-dev-relay-key",
   "node_key": "local-dev-relay-key",
+  "auth_mode": "either",
+  "trusted_agents_file": "config/trusted_agents.json",
   "response_wait_seconds": 5.0,
   "post_ttl_seconds": 30,
   "required_integrations": [
@@ -24,5 +26,6 @@
   "neotoma_token": "",
   "neotoma_entity_type": "contact",
   "neotoma_max_entities": 2000,
-  "neotoma_cache_ttl_seconds": 15.0
+  "neotoma_cache_ttl_seconds": 15.0,
+  "neotoma_read_auth_mode": "auto"
 }
